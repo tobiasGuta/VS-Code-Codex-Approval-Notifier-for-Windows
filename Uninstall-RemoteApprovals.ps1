@@ -7,9 +7,21 @@ function Get-CliExecutableMatch([string]$Text) {
     return [regex]::Match($Text, '(?m)^\s*["'']chatgpt\.cliExecutable["'']\s*:\s*["''](?<v>[^"'']+)["'']\s*,?\s*(?://.*)?$')
 }
 
+function Decode-JsonPath([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $slash = [string][char]92
+    return $Value.Replace($slash + $slash, $slash)
+}
+
+function Encode-JsonPath([string]$Value) {
+    $slash = [string][char]92
+    return $Value.Replace($slash, $slash + $slash).Replace('"', $slash + '"')
+}
+
 function Normalize-SettingPath([string]$Value) {
     if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
-    try { return [IO.Path]::GetFullPath($Value.Replace('\\','\')) } catch { return $Value.Replace('\\','\') }
+    $decoded = Decode-JsonPath $Value
+    try { return [IO.Path]::GetFullPath($decoded) } catch { return $decoded }
 }
 
 $installDir = Join-Path $env:LOCALAPPDATA 'CodexApprovalNotifier\remote'
@@ -25,7 +37,6 @@ $installedShim = Normalize-SettingPath ([string]$state.installedShim)
 $previous = [string]$state.previousCliExecutable
 $startupShortcut = [string]$state.startupShortcut
 
-# Stop only binaries under this installed remote-approvals directory.
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
         -not [string]::IsNullOrWhiteSpace([string]$_.ExecutablePath) -and
@@ -41,12 +52,11 @@ if (-not [string]::IsNullOrWhiteSpace($settingsPath) -and (Test-Path -LiteralPat
         $current = Normalize-SettingPath $match.Groups['v'].Value
         if ([string]::Equals($current, $installedShim, [StringComparison]::OrdinalIgnoreCase)) {
             if (-not [string]::IsNullOrWhiteSpace($previous)) {
-                $jsonPrevious = $previous.Replace('\','\\').Replace('"','\"')
+                $jsonPrevious = Encode-JsonPath $previous
                 $replacement = '    "chatgpt.cliExecutable": "' + $jsonPrevious + '",'
                 $text = $text.Remove($match.Index, $match.Length).Insert($match.Index, $replacement)
             }
             else {
-                # Remove our setting line and its immediately preceding ownership comment when present.
                 $start = $match.Index
                 $prefix = $text.Substring(0, $start)
                 $commentPattern = '(?m)^\s*// Codex Approval Notifier Remote Approvals\s*\r?\n\s*$'
@@ -70,7 +80,6 @@ if (-not [string]::IsNullOrWhiteSpace($startupShortcut)) {
     Remove-Item -LiteralPath $startupShortcut -Force -ErrorAction SilentlyContinue
 }
 
-# Remove runtime descriptors/tokens created by installed child components.
 foreach ($sub in @('companion','lan-gateway')) {
     $runtime = Join-Path $env:LOCALAPPDATA "CodexApprovalNotifier\$sub"
     if (Test-Path -LiteralPath $runtime) { Remove-Item -LiteralPath $runtime -Recurse -Force -ErrorAction SilentlyContinue }
