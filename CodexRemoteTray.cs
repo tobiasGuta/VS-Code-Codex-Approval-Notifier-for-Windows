@@ -28,7 +28,7 @@ internal sealed class CodexRemoteTray : ApplicationContext
 
     private CodexRemoteTray()
     {
-        root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+        root = ResolveAppRoot();
         tray = new NotifyIcon { Icon = SystemIcons.Shield, Text = "Codex Remote Approvals", Visible = true };
         var menu = new ContextMenuStrip();
         statusItem = new ToolStripMenuItem("Remote approvals are off") { Enabled = false };
@@ -48,6 +48,15 @@ internal sealed class CodexRemoteTray : ApplicationContext
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new CodexRemoteTray());
+    }
+
+    private static string ResolveAppRoot()
+    {
+        string here = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+        if (Directory.Exists(Path.Combine(here, "companion-build"))) return here;
+        DirectoryInfo parent = Directory.GetParent(here);
+        if (parent != null && Directory.Exists(Path.Combine(parent.FullName, "companion-build"))) return parent.FullName;
+        return here;
     }
 
     private void EnableAsync()
@@ -169,8 +178,9 @@ internal sealed class CodexRemoteTray : ApplicationContext
         while (DateTime.UtcNow < deadline)
         {
             if (p.HasExited) throw new InvalidOperationException("The LAN gateway stopped while starting.");
+            int remaining = Math.Max(1, (int)(deadline - DateTime.UtcNow).TotalMilliseconds);
             var task = p.StandardOutput.ReadLineAsync();
-            if (!task.Wait(Math.Min(500, Math.Max(1, (int)(deadline-DateTime.UtcNow).TotalMilliseconds)))) continue;
+            if (!task.Wait(remaining)) throw new InvalidOperationException("The LAN gateway did not provide a pairing code.");
             string line = task.Result; if (line == null) break;
             if (line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return line.Substring(prefix.Length).Trim();
         }
