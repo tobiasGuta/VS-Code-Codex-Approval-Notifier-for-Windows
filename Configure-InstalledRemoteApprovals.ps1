@@ -128,6 +128,7 @@ try {
     $modeFile = Join-Path $InstallDir 'shim-build\CodexAppServerShim.mode'
     $statePath = Join-Path $InstallDir 'install-state.json'
     $settingsPath = Join-Path $env:APPDATA 'Code\User\settings.json'
+    $runtimeSecurity = Join-Path $InstallDir 'Initialize-CodexRuntimeSecurity.ps1'
 
     foreach ($required in @(
         $shim,
@@ -136,6 +137,7 @@ try {
         (Join-Path $InstallDir 'mobile-build\CodexMobileUiServer.exe'),
         (Join-Path $InstallDir 'tray-build\CodexRemoteTray.exe'),
         (Join-Path $InstallDir 'Select-CodexLiveThread.ps1'),
+        $runtimeSecurity,
         (Join-Path $InstallDir 'mobile\index.html'),
         (Join-Path $InstallDir 'mobile\app.js'),
         (Join-Path $InstallDir 'mobile\app.css')
@@ -148,6 +150,9 @@ try {
     if (Test-Path -LiteralPath $statePath -PathType Leaf) {
         throw 'Codex Remote Approvals installer state already exists. Uninstall the current copy before reinstalling this prototype.'
     }
+
+    & $runtimeSecurity
+    Write-SetupLog 'Protected runtime ACLs initialized.'
 
     $codexTarget = Find-InstalledCodexBinary
     Write-SetupLog "Detected Codex extension binary: $codexTarget"
