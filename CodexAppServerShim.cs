@@ -67,53 +67,29 @@ internal static class CodexAppServerShim
                 return 82;
             }
 
+            // App-server is a bidirectional protocol transport. Forward the
+            // inherited pipes as raw bytes; do not decode/re-encode lines or
+            // normalize line endings, because that is not transport-transparent.
+            Stream parentStdin = Console.OpenStandardInput();
+            Stream parentStdout = Console.OpenStandardOutput();
+            Stream parentStderr = Console.OpenStandardError();
+            Stream childStdin = child.StandardInput.BaseStream;
+            Stream childStdout = child.StandardOutput.BaseStream;
+            Stream childStderr = child.StandardError.BaseStream;
+
             Thread stdinPump = StartBackgroundThread(delegate
             {
-                try
-                {
-                    string line;
-                    while ((line = Console.In.ReadLine()) != null)
-                    {
-                        child.StandardInput.WriteLine(line);
-                        child.StandardInput.Flush();
-                    }
-                }
-                catch (IOException) { }
-                catch (ObjectDisposedException) { }
-                finally
-                {
-                    try { child.StandardInput.Close(); } catch { }
-                }
+                CopyStream(parentStdin, childStdin, true);
             }, "CodexShim-Stdin");
 
             Thread stdoutPump = StartBackgroundThread(delegate
             {
-                try
-                {
-                    string line;
-                    while ((line = child.StandardOutput.ReadLine()) != null)
-                    {
-                        Console.Out.WriteLine(line);
-                        Console.Out.Flush();
-                    }
-                }
-                catch (IOException) { }
-                catch (ObjectDisposedException) { }
+                CopyStream(childStdout, parentStdout, false);
             }, "CodexShim-Stdout");
 
             Thread stderrPump = StartBackgroundThread(delegate
             {
-                try
-                {
-                    string line;
-                    while ((line = child.StandardError.ReadLine()) != null)
-                    {
-                        Console.Error.WriteLine(line);
-                        Console.Error.Flush();
-                    }
-                }
-                catch (IOException) { }
-                catch (ObjectDisposedException) { }
+                CopyStream(childStderr, parentStderr, false);
             }, "CodexShim-Stderr");
 
             child.WaitForExit();
@@ -141,6 +117,33 @@ internal static class CodexAppServerShim
                 }
                 catch { }
                 child.Dispose();
+            }
+        }
+    }
+
+    private static void CopyStream(Stream source, Stream destination, bool closeDestination)
+    {
+        try
+        {
+            byte[] buffer = new byte[32768];
+            while (true)
+            {
+                int read = source.Read(buffer, 0, buffer.Length);
+                if (read <= 0)
+                {
+                    break;
+                }
+                destination.Write(buffer, 0, read);
+                destination.Flush();
+            }
+        }
+        catch (IOException) { }
+        catch (ObjectDisposedException) { }
+        finally
+        {
+            if (closeDestination)
+            {
+                try { destination.Close(); } catch { }
             }
         }
     }
