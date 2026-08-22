@@ -301,3 +301,7 @@ The following are possible future work, not incomplete V4 requirements:
 - remote steering, interrupt, arbitrary prompts, arbitrary RPC, or arbitrary shell execution.
 
 The last group is intentionally excluded from the V4 security model rather than merely postponed.
+
+## Acknowledgments
+
+V4 development, debugging, test planning, security review, and documentation were assisted by **ChatGPT (OpenAI)**. GitHub contributor attribution remains tied to the human repository authors and commit identities.
