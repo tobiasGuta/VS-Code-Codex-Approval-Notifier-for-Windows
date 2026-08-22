@@ -41,11 +41,13 @@ function Invoke-Build([string]$Script, [hashtable]$Named) {
 
 function Decode-JsonPath([string]$Value) {
     if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
-    return $Value.Replace('\','\')
+    $slash = [string][char]92
+    return $Value.Replace($slash + $slash, $slash)
 }
 
 function Encode-JsonPath([string]$Value) {
-    return $Value.Replace('\','\\').Replace('"','\"')
+    $slash = [string][char]92
+    return $Value.Replace($slash, $slash + $slash).Replace('"', $slash + '"')
 }
 
 function Get-CliExecutableValue([string]$Text) {
