@@ -233,17 +233,23 @@ internal sealed class CodexRemoteTray : ApplicationContext
     private void ShowPairing()
     {
         if (String.IsNullOrWhiteSpace(mobileUrl) || String.IsNullOrWhiteSpace(pairingCode)) return;
-        using (var form = new Form { Text="Pair your phone", StartPosition=FormStartPosition.CenterScreen, ClientSize=new Size(460,235), FormBorderStyle=FormBorderStyle.FixedDialog, MaximizeBox=false, MinimizeBox=false, TopMost=true })
+        string qrUrl = mobileUrl + "#pair=" + pairingCode;
+        using (Bitmap qr = QrCodeV4.Render(qrUrl, 7))
+        using (var form = new Form { Text="Pair your phone", StartPosition=FormStartPosition.CenterScreen, ClientSize=new Size(520,535), FormBorderStyle=FormBorderStyle.FixedDialog, MaximizeBox=false, MinimizeBox=false, TopMost=true })
         {
-            var title=new Label{Text="Connect your phone",Font=new Font(SystemFonts.MessageBoxFont.FontFamily,16,FontStyle.Bold),AutoSize=true,Location=new Point(24,22)};
-            var help=new Label{Text="On your iPhone, open Safari to this address and enter the pairing code.",AutoSize=false,Size=new Size(410,42),Location=new Point(24,60)};
-            var url=new TextBox{Text=mobileUrl,ReadOnly=true,Location=new Point(24,108),Width=330};
-            var copyUrl=new Button{Text="Copy address",Location=new Point(360,106),Width=80}; copyUrl.Click+=delegate{Clipboard.SetText(mobileUrl);};
-            var codeLabel=new Label{Text="Pairing code",AutoSize=true,Location=new Point(24,148)};
-            var code=new TextBox{Text=pairingCode,ReadOnly=true,Font=new Font(FontFamily.GenericMonospace,16,FontStyle.Bold),Location=new Point(125,140),Width=130,TextAlign=HorizontalAlignment.Center};
-            var copyCode=new Button{Text="Copy code",Location=new Point(265,141),Width=90}; copyCode.Click+=delegate{Clipboard.SetText(pairingCode);};
-            var close=new Button{Text="Done",DialogResult=DialogResult.OK,Location=new Point(360,190),Width=80};
-            form.Controls.AddRange(new Control[]{title,help,url,copyUrl,codeLabel,code,copyCode,close}); form.AcceptButton=close; form.ShowDialog();
+            var title = new Label { Text="Connect your phone", Font=new Font(SystemFonts.MessageBoxFont.FontFamily,17,FontStyle.Bold), AutoSize=true, Location=new Point(24,18) };
+            var help = new Label { Text="Scan this QR code with your iPhone camera. Safari will open and pair automatically.", AutoSize=false, Size=new Size(470,42), Location=new Point(24,56), TextAlign=ContentAlignment.MiddleCenter };
+            var picture = new PictureBox { Image=qr, SizeMode=PictureBoxSizeMode.CenterImage, Location=new Point(116,100), Size=new Size(287,287), BackColor=Color.White };
+            var fallback = new Label { Text="If scanning does not work, use the address and code below.", AutoSize=true, Location=new Point(24,402) };
+            var url = new TextBox { Text=mobileUrl, ReadOnly=true, Location=new Point(24,429), Width=330 };
+            var copyUrl = new Button { Text="Copy address", Location=new Point(360,427), Width=110 }; copyUrl.Click += delegate { Clipboard.SetText(mobileUrl); };
+            var codeLabel = new Label { Text="Pairing code", AutoSize=true, Location=new Point(24,471) };
+            var code = new TextBox { Text=pairingCode, ReadOnly=true, Font=new Font(FontFamily.GenericMonospace,14,FontStyle.Bold), Location=new Point(125,463), Width=120, TextAlign=HorizontalAlignment.Center };
+            var copyCode = new Button { Text="Copy code", Location=new Point(255,461), Width=100 }; copyCode.Click += delegate { Clipboard.SetText(pairingCode); };
+            var close = new Button { Text="Done", DialogResult=DialogResult.OK, Location=new Point(390,493), Width=80 };
+            form.Controls.AddRange(new Control[] { title,help,picture,fallback,url,copyUrl,codeLabel,code,copyCode,close });
+            form.AcceptButton=close;
+            form.ShowDialog();
         }
     }
 
