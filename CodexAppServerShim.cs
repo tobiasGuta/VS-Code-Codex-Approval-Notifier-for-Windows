@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -18,6 +20,18 @@ internal static class CodexAppServerShim
     private const string ForceRemoteControlForTestsEnvironmentVariable = "CODEX_APPROVAL_NOTIFIER_SHIM_FORCE_REMOTE_CONTROL_FOR_TESTS";
     private const string LocalBridgeMode = "local-bridge";
 
+    private const uint JobObjectExtendedLimitInformation = 9;
+    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private const uint DeleteAccess = 0x00010000;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareWrite = 0x00000002;
+    private const uint FileShareDelete = 0x00000004;
+    private const uint OpenExisting = 3;
+    private const uint FileAttributeNormal = 0x00000080;
+    private const uint FileFlagDeleteOnClose = 0x04000000;
+
+    private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
+
     private static readonly HashSet<string> AppServerToolingSubcommands =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -31,6 +45,7 @@ internal static class CodexAppServerShim
     private static int Main(string[] args)
     {
         Process child = null;
+        IntPtr childJob = IntPtr.Zero;
         string descriptorPath = null;
         string tokenPath = null;
         try
@@ -62,6 +77,7 @@ internal static class CodexAppServerShim
                 childArgs.Add("--remote-control");
             }
 
+            childJob = CreateKillOnCloseJob();
             var startInfo = CreateStartInfo(targetPath, childArgs);
             child = new Process { StartInfo = startInfo };
             if (!child.Start())
@@ -69,6 +85,7 @@ internal static class CodexAppServerShim
                 Console.Error.WriteLine("Codex app-server shim failed to start the target process.");
                 return 82;
             }
+            AssignChildToJob(childJob, child);
 
             Stream parentStdin = Console.OpenStandardInput();
             Stream parentStdout = Console.OpenStandardOutput();
@@ -116,6 +133,7 @@ internal static class CodexAppServerShim
                 catch { }
                 child.Dispose();
             }
+            CloseNativeHandle(ref childJob);
             SafeDelete(descriptorPath);
             SafeDelete(tokenPath);
         }
@@ -130,6 +148,9 @@ internal static class CodexAppServerShim
         descriptorPath = null;
         tokenPath = null;
         Process child = null;
+        IntPtr childJob = IntPtr.Zero;
+        IntPtr tokenDeleteLease = IntPtr.Zero;
+        IntPtr descriptorDeleteLease = IntPtr.Zero;
         ClientWebSocket socket = null;
         Thread stderrPump = null;
         try
@@ -142,6 +163,7 @@ internal static class CodexAppServerShim
             descriptorPath = Path.Combine(runtimeDirectory, "bridge-" + shimPid + ".json");
             string token = CreateCapabilityToken();
             File.WriteAllText(tokenPath, token + Environment.NewLine, new UTF8Encoding(false));
+            tokenDeleteLease = AcquireDeleteOnCloseLease(tokenPath);
 
             var bridgeArgs = new List<string>(originalArgs);
             bridgeArgs.Add("--listen");
@@ -151,12 +173,14 @@ internal static class CodexAppServerShim
             bridgeArgs.Add("--ws-token-file");
             bridgeArgs.Add(tokenPath);
 
+            childJob = CreateKillOnCloseJob();
             var startInfo = CreateStartInfo(targetPath, bridgeArgs);
             child = new Process { StartInfo = startInfo };
             if (!child.Start())
             {
                 throw new InvalidOperationException("Failed to start loopback WebSocket app-server.");
             }
+            AssignChildToJob(childJob, child);
 
             string wsUri = ReadBoundWebSocketUri(child.StandardError, 30000);
             if (!IsLoopbackWebSocketUri(wsUri))
@@ -188,6 +212,7 @@ internal static class CodexAppServerShim
             }
 
             WriteBridgeDescriptor(descriptorPath, shimPid, child.Id, wsUri, tokenPath, targetPath);
+            descriptorDeleteLease = AcquireDeleteOnCloseLease(descriptorPath);
             Console.Error.WriteLine("[CodexLocalBridge] Connected to " + wsUri + " (Codex PID " + child.Id + ").");
             Console.Error.WriteLine("[CodexLocalBridge] Descriptor: " + descriptorPath);
 
@@ -264,6 +289,9 @@ internal static class CodexAppServerShim
                 catch { }
                 child.Dispose();
             }
+            CloseNativeHandle(ref descriptorDeleteLease);
+            CloseNativeHandle(ref tokenDeleteLease);
+            CloseNativeHandle(ref childJob);
             SafeDelete(descriptorPath);
             SafeDelete(tokenPath);
         }
@@ -284,6 +312,81 @@ internal static class CodexAppServerShim
         };
         startInfo.EnvironmentVariables[ActiveEnvironmentVariable] = "1";
         return startInfo;
+    }
+
+    private static IntPtr CreateKillOnCloseJob()
+    {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not create Codex child job object.");
+        }
+
+        IntPtr infoPointer = IntPtr.Zero;
+        try
+        {
+            var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            info.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+            int length = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+            infoPointer = Marshal.AllocHGlobal(length);
+            Marshal.StructureToPtr(info, infoPointer, false);
+            if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, infoPointer, (uint)length))
+            {
+                int error = Marshal.GetLastWin32Error();
+                CloseHandle(job);
+                throw new Win32Exception(error, "Could not configure Codex child job object.");
+            }
+            return job;
+        }
+        finally
+        {
+            if (infoPointer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(infoPointer);
+            }
+        }
+    }
+
+    private static void AssignChildToJob(IntPtr job, Process child)
+    {
+        if (job == IntPtr.Zero) throw new InvalidOperationException("Codex child job object is not initialized.");
+        if (child == null) throw new ArgumentNullException("child");
+
+        if (!AssignProcessToJobObject(job, child.Handle))
+        {
+            int error = Marshal.GetLastWin32Error();
+            try
+            {
+                if (!child.HasExited) child.Kill();
+            }
+            catch { }
+            throw new Win32Exception(error, "Could not bind Codex child process to shim lifetime.");
+        }
+    }
+
+    private static IntPtr AcquireDeleteOnCloseLease(string path)
+    {
+        IntPtr handle = CreateFile(
+            path,
+            DeleteAccess,
+            FileShareRead | FileShareWrite | FileShareDelete,
+            IntPtr.Zero,
+            OpenExisting,
+            FileAttributeNormal | FileFlagDeleteOnClose,
+            IntPtr.Zero);
+
+        if (handle == InvalidHandleValue)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not bind ephemeral bridge file to shim lifetime: " + path);
+        }
+        return handle;
+    }
+
+    private static void CloseNativeHandle(ref IntPtr handle)
+    {
+        if (handle == IntPtr.Zero || handle == InvalidHandleValue) return;
+        try { CloseHandle(handle); } catch { }
+        handle = IntPtr.Zero;
     }
 
     private static string ReadBoundWebSocketUri(TextReader stderr, int timeoutMilliseconds)
@@ -364,10 +467,6 @@ internal static class CodexAppServerShim
                 WebSocketReceiveResult result;
                 do
                 {
-                    // An idle app-server connection is healthy. Do not impose a
-                    // per-receive deadline here: VS Code can legitimately leave
-                    // the connection silent for minutes or hours. Shutdown is
-                    // driven by socket close/disposal instead.
                     result = socket.ReceiveAsync(
                             new ArraySegment<byte>(buffer),
                             CancellationToken.None)
@@ -628,4 +727,66 @@ internal static class CodexAppServerShim
         builder.Append('"');
         return builder.ToString();
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(
+        IntPtr hJob,
+        uint jobObjectInfoClass,
+        IntPtr lpJobObjectInfo,
+        uint cbJobObjectInfoLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFile(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
 }
