@@ -5,60 +5,114 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function New-ProtectedDirectorySecurity {
-    $current = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    if ($null -eq $current) { throw 'Could not resolve the current Windows user SID.' }
-
-    $system = New-Object Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-18'
-    $admins = New-Object Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-32-544'
-
-    $acl = New-Object Security.AccessControl.DirectorySecurity
-    $acl.SetAccessRuleProtection($true, $false)
-
-    $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
-    $propagate = [Security.AccessControl.PropagationFlags]::None
-    $allow = [Security.AccessControl.AccessControlType]::Allow
-    $full = [Security.AccessControl.FileSystemRights]::FullControl
-
-    foreach ($sid in @($current, $system, $admins)) {
-        $rule = New-Object Security.AccessControl.FileSystemAccessRule -ArgumentList @($sid, $full, $inherit, $propagate, $allow)
-        $acl.AddAccessRule($rule)
-    }
-
-    return $acl
+$icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
+if (-not (Test-Path -LiteralPath $icacls -PathType Leaf)) {
+    throw "Windows ACL utility was not found: $icacls"
 }
 
-function New-ProtectedFileSecurity {
-    $current = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    if ($null -eq $current) { throw 'Could not resolve the current Windows user SID.' }
+$currentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+if ($null -eq $currentUserSid) { throw 'Could not resolve the current Windows user SID.' }
+$currentUserSidValue = $currentUserSid.Value
+$systemSidValue = 'S-1-5-18'
+$administratorsSidValue = 'S-1-5-32-544'
 
-    $system = New-Object Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-18'
-    $admins = New-Object Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-32-544'
+function Invoke-Icacls {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
 
-    $acl = New-Object Security.AccessControl.FileSecurity
-    $acl.SetAccessRuleProtection($true, $false)
+    $output = @(& $script:icacls $Path @Arguments 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $detail = ($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+        if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "icacls exit code $LASTEXITCODE" }
+        throw "Could not harden runtime ACL for ${Path}: $detail"
+    }
+}
 
-    $allow = [Security.AccessControl.AccessControlType]::Allow
-    $full = [Security.AccessControl.FileSystemRights]::FullControl
+function Get-SidValue($IdentityReference) {
+    if ($IdentityReference -is [Security.Principal.SecurityIdentifier]) { return $IdentityReference.Value }
+    return $IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+}
 
-    foreach ($sid in @($current, $system, $admins)) {
-        $rule = New-Object Security.AccessControl.FileSystemAccessRule -ArgumentList @($sid, $full, $allow)
-        $acl.AddAccessRule($rule)
+function Assert-RuntimeAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][bool]$IsDirectory
+    )
+
+    $acl = Get-Acl -LiteralPath $Path
+    if (-not $acl.AreAccessRulesProtected) {
+        throw "Runtime ACL inheritance is not blocked: $Path"
     }
 
-    return $acl
+    $expected = @($script:currentUserSidValue, $script:systemSidValue, $script:administratorsSidValue) | Sort-Object -Unique
+    $rules = @($acl.Access)
+    if ($rules.Count -ne 3) {
+        throw "Runtime ACL has unexpected access rules on $Path; expected exactly three, found $($rules.Count)."
+    }
+
+    $actual = @()
+    foreach ($rule in $rules) {
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) {
+            throw "Runtime ACL contains a deny rule on $Path."
+        }
+        if ($rule.IsInherited) {
+            throw "Runtime ACL still contains an inherited rule on ${Path}: $($rule.IdentityReference)"
+        }
+
+        $full = [Security.AccessControl.FileSystemRights]::FullControl
+        if (($rule.FileSystemRights -band $full) -ne $full) {
+            throw "Runtime ACL rule is not FullControl on ${Path}: $($rule.IdentityReference)"
+        }
+
+        if ($IsDirectory) {
+            $needed = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+            if (($rule.InheritanceFlags -band $needed) -ne $needed) {
+                throw "Runtime directory rule does not propagate to children on ${Path}: $($rule.IdentityReference)"
+            }
+        }
+
+        $actual += Get-SidValue $rule.IdentityReference
+    }
+
+    $actual = $actual | Sort-Object -Unique
+    if (@(Compare-Object $expected $actual).Count -ne 0) {
+        throw "Runtime ACL principals differ from current-user/SYSTEM/Administrators on $Path."
+    }
+}
+
+function Protect-RuntimeFile([string]$Path) {
+    $grants = @(
+        '/inheritance:r',
+        '/grant:r',
+        ('*{0}:F' -f $script:currentUserSidValue),
+        ('*{0}:F' -f $script:systemSidValue),
+        ('*{0}:F' -f $script:administratorsSidValue)
+    )
+    Invoke-Icacls -Path $Path -Arguments $grants
+    Assert-RuntimeAcl -Path $Path -IsDirectory $false
 }
 
 function Protect-RuntimeDirectory([string]$Path) {
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
 
-    # Use the filesystem ACL API rather than Set-Acl. This persists the DACL we
-    # intentionally modified without attempting to write the SACL/security-audit
-    # section, so the per-user initializer remains non-admin and idempotent.
-    [IO.Directory]::SetAccessControl($Path, (New-ProtectedDirectorySecurity))
+    # icacls is available on supported Windows versions and works consistently
+    # from both PowerShell 7 and Windows PowerShell 5.1. We modify only the DACL:
+    # inherited ACEs are removed and exactly three explicit FullControl grants are
+    # installed. No SACL/audit privilege is requested, so this remains per-user.
+    $grants = @(
+        '/inheritance:r',
+        '/grant:r',
+        ('*{0}:(OI)(CI)F' -f $script:currentUserSidValue),
+        ('*{0}:(OI)(CI)F' -f $script:systemSidValue),
+        ('*{0}:(OI)(CI)F' -f $script:administratorsSidValue)
+    )
+    Invoke-Icacls -Path $Path -Arguments $grants
+    Assert-RuntimeAcl -Path $Path -IsDirectory $true
 
     foreach ($file in @(Get-ChildItem -LiteralPath $Path -File -ErrorAction SilentlyContinue)) {
-        [IO.File]::SetAccessControl($file.FullName, (New-ProtectedFileSecurity))
+        Protect-RuntimeFile -Path $file.FullName
     }
 }
 
