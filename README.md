@@ -119,6 +119,26 @@ Before installing:
 4. Allow Setup to configure the Codex CLI shim and Start-menu/Startup entries.
 5. Reopen VS Code after installation.
 
+## Guide
+
+https://github.com/user-attachments/assets/1de3301e-da01-4358-942d-3829839fda48
+
+https://github.com/user-attachments/assets/415629a3-5dbb-4215-9e21-dd22106ccc6d
+
+https://github.com/user-attachments/assets/bff239a5-df24-4503-be61-d4212fae0cbc
+
+<div align="center">
+  
+↑
+↓
+
+</div>
+
+
+https://github.com/user-attachments/assets/ce616652-5e43-4129-a83f-f218380b26fa
+
+https://github.com/user-attachments/assets/17e0be34-4473-4f73-817a-5f3e26f4ce99
+
 The V4 installed payload is placed under:
 
 ```text
