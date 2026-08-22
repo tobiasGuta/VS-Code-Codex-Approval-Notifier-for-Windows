@@ -9,33 +9,40 @@ $runtimeDir = Join-Path $env:LOCALAPPDATA 'CodexApprovalNotifier\local-bridge'
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
 $current = Get-Process -Id $PID -ErrorAction Stop
-$createdBeforeThisProcess = ([DateTimeOffset]$current.StartTime).AddSeconds(-5)
+$currentStart = [DateTimeOffset]$current.StartTime
+$createdBeforeThisProcess = $currentStart.AddSeconds(-5)
+$createdAfterThisProcessSameSecond = $currentStart.AddMilliseconds(250)
 $descriptorPath = Join-Path $runtimeDir "bridge-$PID.json"
 $tokenPath = Join-Path $runtimeDir "bridge-$PID.token"
 
 if (Test-Path -LiteralPath $descriptorPath) { throw "Refusing to overwrite existing bridge descriptor: $descriptorPath" }
 if (Test-Path -LiteralPath $tokenPath) { throw "Refusing to overwrite existing bridge token: $tokenPath" }
 
-$fake = [ordered]@{
-    version = 1
-    shimPid = $PID
-    codexPid = $PID
-    uri = 'ws://127.0.0.1:1'
-    tokenFile = $tokenPath
-    target = 'synthetic-pid-reuse-test'
-    createdAt = $createdBeforeThisProcess.ToString('o')
+function Write-SyntheticDescriptor([DateTimeOffset]$CreatedAt) {
+    $fake = [ordered]@{
+        version = 1
+        shimPid = $PID
+        codexPid = $PID
+        uri = 'ws://127.0.0.1:1'
+        tokenFile = $tokenPath
+        target = 'synthetic-pid-reuse-test'
+        createdAt = $CreatedAt.ToString('o')
+    }
+    $fake | ConvertTo-Json -Compress | Set-Content -LiteralPath $descriptorPath -Encoding UTF8
 }
 
 try {
-    $fake | ConvertTo-Json -Compress | Set-Content -LiteralPath $descriptorPath -Encoding UTF8
     Set-Content -LiteralPath $tokenPath -Value 'synthetic-token-must-not-be-used' -Encoding ASCII
 
     Write-Host '# Codex Runtime Descriptor Identity Acceptance'
     Write-Host "Synthetic descriptor: $descriptorPath"
     Write-Host "Recorded PID:         $PID"
-    Write-Host "Process started:      $(([DateTimeOffset]$current.StartTime).ToString('o'))"
-    Write-Host "Descriptor createdAt: $($createdBeforeThisProcess.ToString('o'))"
+    Write-Host "Process started:      $($currentStart.ToString('o'))"
     Write-Host ''
+
+    # Case 1: descriptor is older than the process. Both supported consumers must
+    # reject it before trusting or contacting the fake WebSocket endpoint.
+    Write-SyntheticDescriptor -CreatedAt $createdBeforeThisProcess
 
     $selectorRejected = $false
     try {
@@ -57,9 +64,39 @@ try {
     Write-Host "Companion launcher rejected reused PID identity: $launcherRejected"
     if (-not $launcherRejected) { throw 'Companion launcher did not reject the synthetic stale/reused-PID descriptor.' }
 
+    # Case 2: descriptor is created later in the same second as the process start.
+    # The identity fence must preserve sub-second precision. Reaching the fake
+    # WebSocket/token stage proves identity validation succeeded; connection failure
+    # is expected because ws://127.0.0.1:1 is deliberately unreachable.
+    Write-SyntheticDescriptor -CreatedAt $createdAfterThisProcessSameSecond
+
+    $selectorIdentityPassed = $false
+    try {
+        & (Join-Path $PSScriptRoot 'Select-CodexLiveThread.ps1') -DescriptorPath $descriptorPath | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch 'started after the descriptor was created') {
+            $selectorIdentityPassed = $true
+        }
+    }
+    Write-Host "Thread selector preserved same-second precision: $selectorIdentityPassed"
+    if (-not $selectorIdentityPassed) { throw 'Thread selector lost same-second descriptor timestamp precision.' }
+
+    $launcherIdentityPassed = $false
+    try {
+        & (Join-Path $PSScriptRoot 'Start-CodexLocalCompanion.ps1') -ThreadId $ThreadId -DescriptorPath $descriptorPath | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch 'started after the descriptor was created') {
+            $launcherIdentityPassed = $true
+        }
+    }
+    Write-Host "Companion launcher preserved same-second precision: $launcherIdentityPassed"
+    if (-not $launcherIdentityPassed) { throw 'Companion launcher lost same-second descriptor timestamp precision.' }
+
     Write-Host ''
-    Write-Host 'PASS: supported bridge consumers fail closed on stale descriptors whose PIDs have been reused.' -ForegroundColor Green
-    Write-Host 'The fake WebSocket endpoint was never trusted or contacted.'
+    Write-Host 'PASS: bridge consumers reject reused-PID descriptors while preserving same-second timestamp precision.' -ForegroundColor Green
+    Write-Host 'The fake WebSocket endpoint was never accepted as a live Codex session.'
 }
 finally {
     Remove-Item -LiteralPath $descriptorPath -Force -ErrorAction SilentlyContinue
