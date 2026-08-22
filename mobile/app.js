@@ -39,6 +39,19 @@
     return token ? { Authorization: `Bearer ${token}` } : {};
   }
 
+  function consumePairingFragment() {
+    const raw = window.location.hash || '';
+    if (!raw.startsWith('#')) return '';
+    const params = new URLSearchParams(raw.slice(1));
+    const code = String(params.get('pair') || '').trim();
+    if (!/^\d{6}$/.test(code)) return '';
+
+    // Remove the short-lived pairing secret from the visible URL/history before
+    // attempting network pairing. The fragment is never sent in the HTTP request.
+    history.replaceState(null, document.title, `${window.location.pathname}${window.location.search}`);
+    return code;
+  }
+
   async function api(path, options = {}) {
     const response = await fetch(path, {
       method: options.method || 'GET',
@@ -95,7 +108,7 @@
     const value = String(code || '').trim();
     if (!/^\d{6}$/.test(value)) {
       els.pairError.textContent = 'Enter the 6-digit code shown on your PC.';
-      return;
+      return false;
     }
 
     els.pairError.textContent = '';
@@ -115,12 +128,14 @@
       els.pairCode.value = '';
       setPairedUi(true);
       await refresh();
+      return true;
     } catch (error) {
       if (error.status === 401) els.pairError.textContent = 'That pairing code was not accepted.';
       else if (error.status === 409) els.pairError.textContent = 'That pairing code has already been used.';
       else if (error.status === 410) els.pairError.textContent = 'That pairing code has expired.';
       else if (error.status === 429) els.pairError.textContent = 'Too many failed attempts. Try again later.';
       else els.pairError.textContent = `Pairing failed: ${error.message}`;
+      return false;
     } finally {
       els.pairButton.disabled = false;
     }
@@ -251,9 +266,16 @@
     if (!document.hidden && getToken()) refresh();
   });
 
+  const fragmentPairingCode = consumePairingFragment();
   if (getToken()) {
     setPairedUi(true);
     refresh();
+  } else if (fragmentPairingCode) {
+    setPairedUi(false);
+    els.pairStatus.textContent = 'Pairing with this PC…';
+    pair(fragmentPairingCode).then(success => {
+      if (!success) loadPairingStatus();
+    });
   } else {
     setPairedUi(false);
     loadPairingStatus();
