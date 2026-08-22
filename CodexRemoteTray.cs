@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -121,13 +122,13 @@ internal sealed class CodexRemoteTray : ApplicationContext
         string ip = FindHomeIpv4();
 
         string companionExe = Path.Combine(root, "companion-build", "CodexLocalCompanion.exe");
-        StartOwned(companionExe, "--descriptor " + Q(bridge) + " --thread " + Q(thread) + " --port 8765", false, "companion");
-        string companion = WaitDescriptor("companion", "companion-*.json", "pid", 10000);
+        OwnedProcess companionProcess = StartOwned(companionExe, "--descriptor " + Q(bridge) + " --thread " + Q(thread) + " --port 8765", false, "companion");
+        string companion = WaitOwnedDescriptor("companion", "companion-", companionProcess, 10000);
 
         string gatewayExe = Path.Combine(root, "gateway-build", "CodexLanGateway.exe");
         OwnedProcess gateway = StartOwned(gatewayExe, "--companion-descriptor " + Q(companion) + " --listen-address " + ip + " --port 8766", true, "LAN gateway");
         pairingCode = ReadLineValue(gateway.Process, "Pairing code:", 10000);
-        string gatewayDescriptor = WaitDescriptor("lan-gateway", "gateway-*.json", "pid", 10000);
+        string gatewayDescriptor = WaitOwnedDescriptor("lan-gateway", "gateway-", gateway, 10000);
         var gd = ReadJson(gatewayDescriptor);
         string gatewayUrl = Convert.ToString(gd["api"]);
 
@@ -228,30 +229,88 @@ internal sealed class CodexRemoteTray : ApplicationContext
         DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
         while (DateTime.UtcNow < deadline)
         {
-            if (p.HasExited) throw new InvalidOperationException("The LAN gateway stopped while starting.");
+            if (p.HasExited) throw new InvalidOperationException(ReadStartupFailure(p, "The LAN gateway stopped while starting."));
             int remaining = Math.Max(1, (int)(deadline - DateTime.UtcNow).TotalMilliseconds);
             var task = p.StandardOutput.ReadLineAsync();
             if (!task.Wait(remaining)) throw new InvalidOperationException("The LAN gateway did not provide a pairing code.");
-            string line = task.Result; if (line == null) break;
+            string line = task.Result;
+            if (line == null)
+            {
+                if (p.HasExited) throw new InvalidOperationException(ReadStartupFailure(p, "The LAN gateway stopped while starting."));
+                break;
+            }
             if (line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return line.Substring(prefix.Length).Trim();
         }
         throw new InvalidOperationException("The LAN gateway did not provide a pairing code.");
     }
 
-    private string WaitDescriptor(string folder, string pattern, string pidField, int timeoutMs)
+    private string ReadStartupFailure(Process p, string fallback)
+    {
+        try
+        {
+            if (p.StartInfo.RedirectStandardError && p.HasExited)
+            {
+                string detail = p.StandardError.ReadToEnd().Trim();
+                if (!String.IsNullOrWhiteSpace(detail)) return detail;
+            }
+        }
+        catch { }
+        return fallback;
+    }
+
+    private string WaitOwnedDescriptor(string folder, string prefix, OwnedProcess owner, int timeoutMs)
     {
         string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexApprovalNotifier", folder);
+        int pid = owner.Process.Id;
+        string expected = Path.Combine(dir, prefix + pid + ".json");
+        DateTime startedUtc = owner.Process.StartTime.ToUniversalTime();
         DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+
         while (DateTime.UtcNow < deadline)
         {
-            if (Directory.Exists(dir))
-                foreach (string f in Directory.GetFiles(dir, pattern).OrderByDescending(File.GetLastWriteTimeUtc))
+            if (owner.Process.HasExited)
+                throw new InvalidOperationException(owner.Role + " stopped while starting.");
+
+            if (File.Exists(expected))
+            {
+                try
                 {
-                    try { var d=ReadJson(f); int pid=Convert.ToInt32(d[pidField]); Process.GetProcessById(pid); return f; } catch { }
+                    if (File.GetLastWriteTimeUtc(expected) < startedUtc)
+                    {
+                        Thread.Sleep(50);
+                        continue;
+                    }
+
+                    var d = ReadJson(expected);
+                    int descriptorPid = Convert.ToInt32(d["pid"]);
+                    if (descriptorPid != pid)
+                    {
+                        Thread.Sleep(50);
+                        continue;
+                    }
+
+                    object createdValue;
+                    if (d.TryGetValue("createdAt", out createdValue) && createdValue != null)
+                    {
+                        DateTimeOffset createdAt = DateTimeOffset.Parse(Convert.ToString(createdValue), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+                        if (createdAt.UtcDateTime < startedUtc)
+                        {
+                            Thread.Sleep(50);
+                            continue;
+                        }
+                    }
+
+                    return expected;
                 }
+                catch
+                {
+                    if (owner.Process.HasExited)
+                        throw new InvalidOperationException(owner.Role + " stopped while starting.");
+                }
+            }
             Thread.Sleep(100);
         }
-        throw new InvalidOperationException("A remote-approval component did not finish starting.");
+        throw new InvalidOperationException("The " + owner.Role + " did not publish its current runtime descriptor.");
     }
 
     private string FindLiveDescriptor(string dir, string pattern, string firstPid, string secondPid)
@@ -259,7 +318,21 @@ internal sealed class CodexRemoteTray : ApplicationContext
         if (!Directory.Exists(dir)) throw new InvalidOperationException("Open VS Code and a Codex chat first.");
         foreach (string f in Directory.GetFiles(dir, pattern).OrderByDescending(File.GetLastWriteTimeUtc))
         {
-            try { var d=ReadJson(f); Process.GetProcessById(Convert.ToInt32(d[firstPid])); Process.GetProcessById(Convert.ToInt32(d[secondPid])); return f; } catch { }
+            try
+            {
+                var d = ReadJson(f);
+                int first = Convert.ToInt32(d[firstPid]);
+                int second = Convert.ToInt32(d[secondPid]);
+                object createdValue;
+                if (!d.TryGetValue("createdAt", out createdValue) || createdValue == null) continue;
+                DateTimeOffset createdAt = DateTimeOffset.Parse(Convert.ToString(createdValue), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+                Process firstProcess = Process.GetProcessById(first);
+                Process secondProcess = Process.GetProcessById(second);
+                if (firstProcess.StartTime.ToUniversalTime() > createdAt.UtcDateTime) continue;
+                if (secondProcess.StartTime.ToUniversalTime() > createdAt.UtcDateTime) continue;
+                return f;
+            }
+            catch { }
         }
         throw new InvalidOperationException("Remote approvals are not connected to VS Code yet. Open VS Code and a Codex chat first.");
     }
