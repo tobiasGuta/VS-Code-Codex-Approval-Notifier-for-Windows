@@ -13,7 +13,6 @@ function New-ProtectedDirectorySecurity {
     $admins = New-Object Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-32-544'
 
     $acl = New-Object Security.AccessControl.DirectorySecurity
-    $acl.SetOwner($current)
     $acl.SetAccessRuleProtection($true, $false)
 
     $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
@@ -37,7 +36,6 @@ function New-ProtectedFileSecurity {
     $admins = New-Object Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-32-544'
 
     $acl = New-Object Security.AccessControl.FileSecurity
-    $acl.SetOwner($current)
     $acl.SetAccessRuleProtection($true, $false)
 
     $allow = [Security.AccessControl.AccessControlType]::Allow
@@ -53,10 +51,14 @@ function New-ProtectedFileSecurity {
 
 function Protect-RuntimeDirectory([string]$Path) {
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
-    Set-Acl -LiteralPath $Path -AclObject (New-ProtectedDirectorySecurity)
+
+    # Use the filesystem ACL API rather than Set-Acl. This persists the DACL we
+    # intentionally modified without attempting to write the SACL/security-audit
+    # section, so the per-user initializer remains non-admin and idempotent.
+    [IO.Directory]::SetAccessControl($Path, (New-ProtectedDirectorySecurity))
 
     foreach ($file in @(Get-ChildItem -LiteralPath $Path -File -ErrorAction SilentlyContinue)) {
-        Set-Acl -LiteralPath $file.FullName -AclObject (New-ProtectedFileSecurity)
+        [IO.File]::SetAccessControl($file.FullName, (New-ProtectedFileSecurity))
     }
 }
 
