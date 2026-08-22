@@ -9,8 +9,8 @@ function New-ProtectedDirectorySecurity {
     $current = [Security.Principal.WindowsIdentity]::GetCurrent().User
     if ($null -eq $current) { throw 'Could not resolve the current Windows user SID.' }
 
-    $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
-    $admins = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    $system = New-Object Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-18'
+    $admins = New-Object Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-32-544'
 
     $acl = New-Object Security.AccessControl.DirectorySecurity
     $acl.SetOwner($current)
@@ -22,7 +22,7 @@ function New-ProtectedDirectorySecurity {
     $full = [Security.AccessControl.FileSystemRights]::FullControl
 
     foreach ($sid in @($current, $system, $admins)) {
-        $rule = New-Object Security.AccessControl.FileSystemAccessRule($sid, $full, $inherit, $propagate, $allow)
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule -ArgumentList @($sid, $full, $inherit, $propagate, $allow)
         $acl.AddAccessRule($rule)
     }
 
@@ -33,8 +33,8 @@ function New-ProtectedFileSecurity {
     $current = [Security.Principal.WindowsIdentity]::GetCurrent().User
     if ($null -eq $current) { throw 'Could not resolve the current Windows user SID.' }
 
-    $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
-    $admins = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    $system = New-Object Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-18'
+    $admins = New-Object Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-32-544'
 
     $acl = New-Object Security.AccessControl.FileSecurity
     $acl.SetOwner($current)
@@ -44,7 +44,7 @@ function New-ProtectedFileSecurity {
     $full = [Security.AccessControl.FileSystemRights]::FullControl
 
     foreach ($sid in @($current, $system, $admins)) {
-        $rule = New-Object Security.AccessControl.FileSystemAccessRule($sid, $full, $allow)
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule -ArgumentList @($sid, $full, $allow)
         $acl.AddAccessRule($rule)
     }
 
