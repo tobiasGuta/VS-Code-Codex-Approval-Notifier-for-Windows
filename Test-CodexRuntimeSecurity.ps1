@@ -3,6 +3,17 @@ param()
 
 $ErrorActionPreference = 'Stop'
 
+$securityModuleManifest = [IO.Path]::Combine(
+    $PSHOME,
+    'Modules',
+    'Microsoft.PowerShell.Security',
+    'Microsoft.PowerShell.Security.psd1'
+)
+if (-not [IO.File]::Exists($securityModuleManifest)) {
+    throw "Microsoft.PowerShell.Security was not found for this PowerShell host: $securityModuleManifest"
+}
+Import-Module -Name $securityModuleManifest -Force -ErrorAction Stop
+
 function Get-SidValue($IdentityReference) {
     if ($IdentityReference -is [Security.Principal.SecurityIdentifier]) { return $IdentityReference.Value }
     return $IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
@@ -113,9 +124,6 @@ try {
     & $initializer -Root $root
     & $initializer -Root $root
 
-    # Real runtime descriptors/tokens are created after setup has already hardened
-    # these directories. Verify that future child files inherit only the protected
-    # three-principal DACL from their parent and cannot regain broader AppData ACEs.
     foreach ($case in $cases) {
         $dir = Join-Path $root $case.Directory
         Set-Content -LiteralPath (Join-Path $dir 'future-runtime-file.txt') -Value 'future' -Encoding ASCII
