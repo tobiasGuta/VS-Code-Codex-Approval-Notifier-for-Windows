@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('passthrough', 'remote-control')]
+    [ValidateSet('passthrough', 'remote-control', 'local-bridge')]
     [string]$Mode = 'passthrough',
     [string]$ShimPath = (Join-Path $PSScriptRoot 'shim-build\CodexAppServerShim.exe')
 )
@@ -50,7 +50,7 @@ $updated = $text.Insert($openBrace + 1, $insertion)
 [IO.File]::WriteAllText($settingsPath, $updated, (New-Object Text.UTF8Encoding($false)))
 
 $state = [ordered]@{
-    version = 2
+    version = 3
     enabledAt = [DateTimeOffset]::Now.ToString('o')
     settingsPath = $settingsPath
     backupPath = $backupPath
