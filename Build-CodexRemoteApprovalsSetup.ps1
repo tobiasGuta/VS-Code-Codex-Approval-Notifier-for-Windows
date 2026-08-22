@@ -86,6 +86,7 @@ Invoke-BuildScript -Script 'BuildCodexRemoteTray.ps1' -OutputDirectory (Join-Pat
 
 foreach ($file in @(
     'Select-CodexLiveThread.ps1',
+    'Initialize-CodexRuntimeSecurity.ps1',
     'Configure-InstalledRemoteApprovals.ps1',
     'Unconfigure-InstalledRemoteApprovals.ps1'
 )) {
@@ -102,6 +103,7 @@ $requiredRuntime = @(
     'mobile-build\CodexMobileUiServer.exe',
     'tray-build\CodexRemoteTray.exe',
     'Select-CodexLiveThread.ps1',
+    'Initialize-CodexRuntimeSecurity.ps1',
     'Configure-InstalledRemoteApprovals.ps1',
     'Unconfigure-InstalledRemoteApprovals.ps1',
     'mobile\index.html',
