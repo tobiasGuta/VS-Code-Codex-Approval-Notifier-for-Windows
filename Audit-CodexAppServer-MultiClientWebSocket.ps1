@@ -33,13 +33,13 @@ function Stop-ProbeProcess {
     if ($null -eq $Process) { return }
     try {
         if (-not $Process.HasExited) {
-            $Process.Kill()
+            [void]$Process.Kill()
             $Process.WaitForExit(3000) | Out-Null
         }
     }
     catch { }
     finally {
-        try { $Process.Dispose() } catch { }
+        try { [void]$Process.Dispose() } catch { }
     }
 }
 
@@ -59,7 +59,7 @@ function Read-BoundWebSocketUri {
             if ($null -eq $line) {
                 break
             }
-            $lines.Add($line)
+            [void]$lines.Add($line)
 
             $plain = [regex]::Replace($line, "`e\[[0-?]*[ -/]*[@-~]", '')
             $match = [regex]::Match($plain, 'ws://(?:127\.0\.0\.1|localhost|\[::1\]):\d+')
@@ -95,9 +95,9 @@ function New-ConnectedWebSocket {
     while ([DateTime]::UtcNow -lt $deadline) {
         $socket = New-Object System.Net.WebSockets.ClientWebSocket
         $cts = New-Object System.Threading.CancellationTokenSource
-        $cts.CancelAfter(1500)
+        [void]$cts.CancelAfter(1500)
         try {
-            $socket.ConnectAsync([Uri]$Uri, $cts.Token).GetAwaiter().GetResult()
+            [void]$socket.ConnectAsync([Uri]$Uri, $cts.Token).GetAwaiter().GetResult()
             if ($socket.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
                 return $socket
             }
@@ -106,10 +106,10 @@ function New-ConnectedWebSocket {
             $lastError = $_.Exception.Message
         }
         finally {
-            $cts.Dispose()
+            [void]$cts.Dispose()
         }
 
-        try { $socket.Dispose() } catch { }
+        try { [void]$socket.Dispose() } catch { }
         Start-Sleep -Milliseconds 50
     }
 
@@ -125,9 +125,9 @@ function Send-WebSocketText {
     $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
     $segment = [ArraySegment[byte]]::new($bytes)
     $cts = New-Object System.Threading.CancellationTokenSource
-    $cts.CancelAfter(10000)
+    [void]$cts.CancelAfter(10000)
     try {
-        $Socket.SendAsync(
+        [void]$Socket.SendAsync(
             $segment,
             [System.Net.WebSockets.WebSocketMessageType]::Text,
             $true,
@@ -135,7 +135,7 @@ function Send-WebSocketText {
         ).GetAwaiter().GetResult()
     }
     finally {
-        $cts.Dispose()
+        [void]$cts.Dispose()
     }
 }
 
@@ -151,12 +151,12 @@ function Receive-WebSocketText {
     try {
         do {
             $cts = New-Object System.Threading.CancellationTokenSource
-            $cts.CancelAfter($TimeoutMilliseconds)
+            [void]$cts.CancelAfter($TimeoutMilliseconds)
             try {
                 $result = $Socket.ReceiveAsync($segment, $cts.Token).GetAwaiter().GetResult()
             }
             finally {
-                $cts.Dispose()
+                [void]$cts.Dispose()
             }
 
             if ($result.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) {
@@ -166,14 +166,14 @@ function Receive-WebSocketText {
                 throw "Unexpected WebSocket message type: $($result.MessageType)"
             }
             if ($result.Count -gt 0) {
-                $memory.Write($buffer, 0, $result.Count)
+                [void]$memory.Write($buffer, 0, $result.Count)
             }
         } while (-not $result.EndOfMessage)
 
         return [Text.Encoding]::UTF8.GetString($memory.ToArray())
     }
     finally {
-        $memory.Dispose()
+        [void]$memory.Dispose()
     }
 }
 
@@ -193,7 +193,7 @@ function Send-JsonRpcRequest {
         $message.params = $Params
     }
     $json = $message | ConvertTo-Json -Compress -Depth 12
-    Send-WebSocketText -Socket $Socket -Text $json
+    [void](Send-WebSocketText -Socket $Socket -Text $json)
 }
 
 function Receive-JsonRpcForId {
@@ -240,7 +240,7 @@ function Initialize-WebSocketClient {
         }
     }
 
-    Send-JsonRpcRequest -Socket $Socket -Id $Id -Method 'initialize' -Params $params
+    [void](Send-JsonRpcRequest -Socket $Socket -Id $Id -Method 'initialize' -Params $params)
     $response = Receive-JsonRpcForId -Socket $Socket -Id $Id
     if ($null -ne $response.Message.error) {
         throw "Initialize returned an error for ${Name}: $($response.Raw)"
@@ -249,7 +249,7 @@ function Initialize-WebSocketClient {
         throw "Initialize returned no result for ${Name}: $($response.Raw)"
     }
 
-    Send-WebSocketText -Socket $Socket -Text '{"method":"initialized"}'
+    [void](Send-WebSocketText -Socket $Socket -Text '{"method":"initialized"}')
     return $response
 }
 
@@ -299,7 +299,7 @@ try {
     }
 
     $bound = Read-BoundWebSocketUri -Process $process
-    $uri = $bound.Uri
+    $uri = [string]$bound.Uri
     if ($uri -notmatch '^ws://(?:127\.0\.0\.1|localhost|\[::1\]):\d+$') {
         throw "App-server did not bind to loopback only: $uri"
     }
@@ -318,8 +318,8 @@ try {
     Write-Host 'Same initialize request ID:     True'
 
     $configParams = [ordered]@{ includeLayers = $false }
-    Send-JsonRpcRequest -Socket $ws1 -Id 77 -Method 'config/read' -Params $configParams
-    Send-JsonRpcRequest -Socket $ws2 -Id 77 -Method 'config/read' -Params $configParams
+    [void](Send-JsonRpcRequest -Socket $ws1 -Id 77 -Method 'config/read' -Params $configParams)
+    [void](Send-JsonRpcRequest -Socket $ws2 -Id 77 -Method 'config/read' -Params $configParams)
 
     $config1 = Receive-JsonRpcForId -Socket $ws1 -Id 77
     $config2 = Receive-JsonRpcForId -Socket $ws2 -Id 77
@@ -342,10 +342,10 @@ try {
     Write-Host 'This validates a LAN-only companion architecture without using Codex remote-control relay.'
 }
 finally {
-    if ($null -ne $ws1) { try { $ws1.Dispose() } catch { } }
-    if ($null -ne $ws2) { try { $ws2.Dispose() } catch { } }
+    if ($null -ne $ws1) { try { [void]$ws1.Dispose() } catch { } }
+    if ($null -ne $ws2) { try { [void]$ws2.Dispose() } catch { } }
     if ($null -ne $process) {
-        try { $process.StandardInput.Close() } catch { }
+        try { [void]$process.StandardInput.Close() } catch { }
         Stop-ProbeProcess -Process $process
     }
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
