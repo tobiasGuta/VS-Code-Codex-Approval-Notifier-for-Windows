@@ -116,7 +116,10 @@ function Receive-JsonRpcForId {
         [Parameter(Mandatory)][int]$Id
     )
 
-    $observed = New-Object System.Collections.Generic.List[object]
+    # Use a native PowerShell array here rather than List[object]. Some
+    # PowerShell/.NET combinations throw "Argument types do not match" when a
+    # generic List[object] is array-wrapped inside a PSCustomObject property.
+    $observed = @()
     for ($attempt = 0; $attempt -lt 200; $attempt++) {
         $text = Receive-WebSocketText -Socket $Socket
         try {
@@ -132,14 +135,14 @@ function Receive-JsonRpcForId {
             return [pscustomobject]@{
                 Raw = $text
                 Message = $message
-                Observed = @($observed)
+                Observed = $observed
             }
         }
 
-        $null = $observed.Add([pscustomobject]@{
+        $observed += [pscustomobject]@{
             Raw = $text
             Message = $message
-        })
+        }
     }
 
     throw "Did not receive JSON-RPC response id $Id within the message limit."
