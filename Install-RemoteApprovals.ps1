@@ -112,6 +112,11 @@ if (@(Get-Process -Name Code -ErrorAction SilentlyContinue).Count -gt 0) {
     throw 'Close all VS Code windows before installing Remote Approvals. The installer will not terminate VS Code for you.'
 }
 
+$prototypeStatePath = Join-Path $env:LOCALAPPDATA 'CodexApprovalNotifier\shim-acceptance\state.json'
+if (Test-Path -LiteralPath $prototypeStatePath -PathType Leaf) {
+    throw 'Prototype shim acceptance state is still active. From the repository, run .\Disable-CodexAppServerShim.ps1 first. Keep VS Code closed afterward, then rerun this installer.'
+}
+
 $required = @(
     'CodexAppServerShim.cs','BuildCodexAppServerShim.ps1',
     'CodexLocalCompanion.cs','BuildCodexLocalCompanion.ps1',
@@ -127,7 +132,9 @@ $installDir = Join-Path $env:LOCALAPPDATA 'CodexApprovalNotifier\remote'
 $stageDir = Join-Path $env:TEMP ('CodexRemoteApprovals-' + [guid]::NewGuid().ToString('N'))
 $settingsPath = Join-Path $env:APPDATA 'Code\User\settings.json'
 $startupDir = [Environment]::GetFolderPath('Startup')
+$programsDir = [Environment]::GetFolderPath('Programs')
 $startupShortcut = Join-Path $startupDir 'Codex Remote Approvals.lnk'
+$programShortcut = Join-Path $programsDir 'Codex Remote Approvals.lnk'
 $statePath = Join-Path $installDir 'install-state.json'
 
 if (Test-Path -LiteralPath $statePath -PathType Leaf) { throw 'Remote Approvals is already installed. Uninstall it before reinstalling this prototype.' }
@@ -162,12 +169,15 @@ try {
     $settingState = Set-InstallerCliSetting $settingsPath $installedShim
     $settingsChanged = $true
 
+    $trayExe = Join-Path $installDir 'tray-build\CodexRemoteTray.exe'
     $wsh = New-Object -ComObject WScript.Shell
-    $link = $wsh.CreateShortcut($startupShortcut)
-    $link.TargetPath = Join-Path $installDir 'tray-build\CodexRemoteTray.exe'
-    $link.WorkingDirectory = $installDir
-    $link.Description = 'Codex Remote Approvals tray application'
-    $link.Save()
+    foreach ($shortcut in @($startupShortcut, $programShortcut)) {
+        $link = $wsh.CreateShortcut($shortcut)
+        $link.TargetPath = $trayExe
+        $link.WorkingDirectory = $installDir
+        $link.Description = 'Codex Remote Approvals tray application'
+        $link.Save()
+    }
 
     $state = [ordered]@{
         version = 1
@@ -179,22 +189,24 @@ try {
         settingAdded = [bool]$settingState.added
         settingMigrated = [bool]$settingState.migrated
         startupShortcut = $startupShortcut
+        programShortcut = $programShortcut
         codexTarget = $codexTarget
     }
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8
 
-    Start-Process -FilePath (Join-Path $installDir 'tray-build\CodexRemoteTray.exe')
+    Start-Process -FilePath $trayExe
 
     Write-Host ''
     Write-Host 'Codex Remote Approvals installed.' -ForegroundColor Green
     Write-Host "Install directory: $installDir"
-    Write-Host 'The tray app is running and will start automatically when you sign in.'
+    Write-Host 'The tray app is running, is available from the Start menu, and will start automatically when you sign in.'
     Write-Host ''
     Write-Host 'NEXT: Open VS Code. The Codex extension will start through the local bridge automatically.' -ForegroundColor Cyan
     Write-Host 'Then use the tray icon -> Enable Remote Approvals -> scan the QR code.' -ForegroundColor Cyan
 }
 catch {
     Remove-Item -LiteralPath $startupShortcut -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $programShortcut -Force -ErrorAction SilentlyContinue
     if ($settingsChanged) {
         try {
             if ($settingsExisted) {
