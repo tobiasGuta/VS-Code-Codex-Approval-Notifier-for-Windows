@@ -34,6 +34,7 @@ internal sealed class CodexRemoteTray : ApplicationContext
     private volatile bool busy;
     private volatile bool supervisionActive;
     private volatile bool supervisionFailureHandling;
+    private volatile Form pairingForm;
     private string mobileUrl;
     private string pairingCode;
 
@@ -99,6 +100,7 @@ internal sealed class CodexRemoteTray : ApplicationContext
                 StopOwned();
                 Ui(delegate
                 {
+                    ClosePairingFormOnUiThread();
                     mobileUrl = null; pairingCode = null;
                     statusItem.Text = "Remote approvals are off";
                     enableItem.Enabled = true; pairItem.Enabled = false; disableItem.Enabled = false;
@@ -214,14 +216,47 @@ internal sealed class CodexRemoteTray : ApplicationContext
             finally
             {
                 mobileUrl = null; pairingCode = null;
-                Ui(delegate
-                {
-                    statusItem.Text = "Remote approvals stopped: " + entry.Role + " exited";
-                    enableItem.Enabled = true; pairItem.Enabled = false; disableItem.Enabled = false;
-                    tray.ShowBalloonTip(3500, "Codex Remote Approvals", "Remote approvals stopped because the " + entry.Role + " process exited.", ToolTipIcon.Warning);
-                });
+                ShowSupervisionFailureUi(entry.Role);
             }
         });
+    }
+
+    private void ShowSupervisionFailureUi(string role)
+    {
+        MethodInvoker action = delegate
+        {
+            statusItem.Text = "Remote approvals stopped: " + role + " exited";
+            enableItem.Enabled = true; pairItem.Enabled = false; disableItem.Enabled = false;
+            tray.ShowBalloonTip(3500, "Codex Remote Approvals", "Remote approvals stopped because the " + role + " process exited.", ToolTipIcon.Warning);
+            ClosePairingFormOnUiThread();
+        };
+
+        Form active = pairingForm;
+        if (active != null)
+        {
+            try
+            {
+                if (!active.IsDisposed && active.IsHandleCreated)
+                {
+                    active.BeginInvoke(action);
+                    return;
+                }
+            }
+            catch { }
+        }
+        Ui(action);
+    }
+
+    private void ClosePairingFormOnUiThread()
+    {
+        Form active = pairingForm;
+        pairingForm = null;
+        if (active == null) return;
+        try
+        {
+            if (!active.IsDisposed) active.Close();
+        }
+        catch { }
     }
 
     private string ReadLineValue(Process p, string prefix, int timeoutMs)
@@ -373,7 +408,12 @@ internal sealed class CodexRemoteTray : ApplicationContext
             var close = new Button { Text="Done", DialogResult=DialogResult.OK, Location=new Point(390,493), Width=80 };
             form.Controls.AddRange(new Control[] { title,help,picture,fallback,url,copyUrl,codeLabel,code,copyCode,close });
             form.AcceptButton=close;
-            form.ShowDialog();
+            pairingForm = form;
+            try { form.ShowDialog(); }
+            finally
+            {
+                if (Object.ReferenceEquals(pairingForm, form)) pairingForm = null;
+            }
         }
     }
 
@@ -382,6 +422,7 @@ internal sealed class CodexRemoteTray : ApplicationContext
         if (busy) return;
         supervisionActive = false;
         StopOwned(); mobileUrl=null; pairingCode=null;
+        ClosePairingFormOnUiThread();
         statusItem.Text="Remote approvals are off"; enableItem.Enabled=true; pairItem.Enabled=false; disableItem.Enabled=false;
         tray.ShowBalloonTip(2000,"Codex Remote Approvals","Remote approvals were stopped.",ToolTipIcon.Info);
     }
