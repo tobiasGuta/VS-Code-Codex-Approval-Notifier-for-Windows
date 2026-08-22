@@ -9,21 +9,71 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-BridgeRuntimeDirectory {
+    return (Join-Path $env:LOCALAPPDATA 'CodexApprovalNotifier\local-bridge')
+}
+
+function Test-BridgeDescriptorIdentity {
+    param(
+        [Parameter(Mandatory)]$Descriptor,
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$ThrowOnFailure
+    )
+
+    try {
+        $shimPid = [int]$Descriptor.shimPid
+        $codexPid = [int]$Descriptor.codexPid
+        if ($shimPid -le 0 -or $codexPid -le 0) { throw 'Bridge descriptor contains an invalid process id.' }
+
+        $createdText = [string]$Descriptor.createdAt
+        if ([string]::IsNullOrWhiteSpace($createdText)) { throw 'Bridge descriptor is missing createdAt.' }
+        $createdAt = [DateTimeOffset]::Parse($createdText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+
+        $runtimeDir = [IO.Path]::GetFullPath((Get-BridgeRuntimeDirectory)).TrimEnd('\')
+        $actualDescriptor = [IO.Path]::GetFullPath($Path)
+        $expectedDescriptor = [IO.Path]::GetFullPath((Join-Path $runtimeDir "bridge-$shimPid.json"))
+        if (-not [string]::Equals($actualDescriptor, $expectedDescriptor, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Bridge descriptor path does not match its shim PID.'
+        }
+
+        $tokenPath = [string]$Descriptor.tokenFile
+        if ([string]::IsNullOrWhiteSpace($tokenPath)) { throw 'Bridge descriptor is missing tokenFile.' }
+        $actualToken = [IO.Path]::GetFullPath($tokenPath)
+        $expectedToken = [IO.Path]::GetFullPath((Join-Path $runtimeDir "bridge-$shimPid.token"))
+        if (-not [string]::Equals($actualToken, $expectedToken, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Bridge token path does not match its shim PID.'
+        }
+
+        $shim = Get-Process -Id $shimPid -ErrorAction Stop
+        $codex = Get-Process -Id $codexPid -ErrorAction Stop
+        if ([DateTimeOffset]$shim.StartTime -gt $createdAt) {
+            throw 'Bridge shim PID belongs to a process that started after the descriptor was created.'
+        }
+        if ([DateTimeOffset]$codex.StartTime -gt $createdAt) {
+            throw 'Bridge Codex PID belongs to a process that started after the descriptor was created.'
+        }
+        return $true
+    }
+    catch {
+        if ($ThrowOnFailure) { throw }
+        return $false
+    }
+}
+
 if (-not (Test-Path -LiteralPath $CompanionPath -PathType Leaf)) {
     throw "Companion executable not found: $CompanionPath"
 }
 $CompanionPath = (Resolve-Path -LiteralPath $CompanionPath).Path
 
 if ([string]::IsNullOrWhiteSpace($DescriptorPath)) {
-    $runtimeDir = Join-Path $env:LOCALAPPDATA 'CodexApprovalNotifier\local-bridge'
+    $runtimeDir = Get-BridgeRuntimeDirectory
     $candidates = @(Get-ChildItem -LiteralPath $runtimeDir -Filter 'bridge-*.json' -File -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTimeUtc -Descending)
 
     foreach ($candidate in $candidates) {
         try {
             $d = Get-Content -LiteralPath $candidate.FullName -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-            if ($null -ne (Get-Process -Id ([int]$d.shimPid) -ErrorAction SilentlyContinue) -and
-                $null -ne (Get-Process -Id ([int]$d.codexPid) -ErrorAction SilentlyContinue)) {
+            if (Test-BridgeDescriptorIdentity -Descriptor $d -Path $candidate.FullName) {
                 $DescriptorPath = $candidate.FullName
                 break
             }
@@ -36,6 +86,8 @@ if ([string]::IsNullOrWhiteSpace($DescriptorPath) -or -not (Test-Path -LiteralPa
     throw 'No live local-bridge descriptor was found.'
 }
 $DescriptorPath = (Resolve-Path -LiteralPath $DescriptorPath).Path
+$descriptor = Get-Content -LiteralPath $DescriptorPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+$null = Test-BridgeDescriptorIdentity -Descriptor $descriptor -Path $DescriptorPath -ThrowOnFailure
 
 Write-Host 'Starting Codex Local Companion...'
 Write-Host "Thread:       $ThreadId"
