@@ -24,6 +24,10 @@ function Normalize-SettingPath([string]$Value) {
     try { return [IO.Path]::GetFullPath($decoded) } catch { return $decoded }
 }
 
+if (@(Get-Process -Name Code -ErrorAction SilentlyContinue).Count -gt 0) {
+    throw 'Close all VS Code windows before uninstalling Remote Approvals. The uninstaller will not terminate VS Code for you.'
+}
+
 $installDir = Join-Path $env:LOCALAPPDATA 'CodexApprovalNotifier\remote'
 $statePath = Join-Path $installDir 'install-state.json'
 if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
@@ -36,14 +40,19 @@ $settingsPath = [string]$state.settingsPath
 $installedShim = Normalize-SettingPath ([string]$state.installedShim)
 $previous = [string]$state.previousCliExecutable
 $startupShortcut = [string]$state.startupShortcut
+$programShortcut = [string]$state.programShortcut
 
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+$ownedProcesses = @(
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
         -not [string]::IsNullOrWhiteSpace([string]$_.ExecutablePath) -and
         ([string]$_.ExecutablePath).StartsWith($installDir, [StringComparison]::OrdinalIgnoreCase)
-    } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-Start-Sleep -Milliseconds 250
+    }
+)
+foreach ($process in $ownedProcesses) {
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Milliseconds 350
 
 if (-not [string]::IsNullOrWhiteSpace($settingsPath) -and (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
     $text = [IO.File]::ReadAllText($settingsPath)
@@ -76,17 +85,17 @@ if (-not [string]::IsNullOrWhiteSpace($settingsPath) -and (Test-Path -LiteralPat
     }
 }
 
-if (-not [string]::IsNullOrWhiteSpace($startupShortcut)) {
-    Remove-Item -LiteralPath $startupShortcut -Force -ErrorAction SilentlyContinue
+foreach ($shortcut in @($startupShortcut, $programShortcut)) {
+    if (-not [string]::IsNullOrWhiteSpace($shortcut)) {
+        Remove-Item -LiteralPath $shortcut -Force -ErrorAction SilentlyContinue
+    }
 }
 
-foreach ($sub in @('companion','lan-gateway')) {
-    $runtime = Join-Path $env:LOCALAPPDATA "CodexApprovalNotifier\$sub"
-    if (Test-Path -LiteralPath $runtime) { Remove-Item -LiteralPath $runtime -Recurse -Force -ErrorAction SilentlyContinue }
-}
-
+# Shared development runtime directories are intentionally left alone. Installed
+# companion/gateway instances remove their own descriptor/token files on normal
+# shutdown, and the uninstaller must not delete state belonging to a manual/dev run.
 Remove-Item -LiteralPath $installDir -Recurse -Force
 
 Write-Host ''
 Write-Host 'Codex Remote Approvals uninstalled.' -ForegroundColor Green
-Write-Host 'Fully close and reopen VS Code if it was open after installation so Codex uses the restored CLI setting.' -ForegroundColor Cyan
+Write-Host 'VS Code can now be reopened with the restored Codex CLI setting.' -ForegroundColor Cyan
