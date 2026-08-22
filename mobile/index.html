@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Codex Remote Approval</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">HOME LAN</p>
+        <h1>Codex Remote Approval</h1>
+        <p class="sub">Approve or deny native VS Code Codex command requests from this paired device.</p>
+      </div>
+      <span id="connectionBadge" class="badge neutral">Not paired</span>
+    </header>
+
+    <section class="warning" aria-label="Prototype security notice">
+      Prototype transport is HTTP on your trusted home Wi-Fi. Do not use this on public or untrusted networks.
+    </section>
+
+    <section id="pairPanel" class="panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">PAIR DEVICE</p>
+          <h2>Enter the code from your PC</h2>
+        </div>
+      </div>
+      <p id="pairStatus" class="muted">Checking pairing availability…</p>
+      <form id="pairForm" class="pair-form" autocomplete="off">
+        <label for="pairCode">6-digit code</label>
+        <input id="pairCode" name="pairCode" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000" required>
+        <button id="pairButton" type="submit" class="button primary">Pair this device</button>
+      </form>
+      <p id="pairError" class="error" role="alert"></p>
+    </section>
+
+    <section id="appPanel" class="hidden">
+      <section class="panel status-grid">
+        <div>
+          <p class="eyebrow">CODEX STATUS</p>
+          <h2 id="statusText">Connecting…</h2>
+        </div>
+        <div class="status-meta">
+          <span>Pending approvals</span>
+          <strong id="pendingCount">0</strong>
+        </div>
+        <div class="thread-row">
+          <span>Thread</span>
+          <code id="threadId">—</code>
+        </div>
+      </section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">PENDING</p>
+          <h2>Command approvals</h2>
+        </div>
+        <button id="refreshButton" class="button ghost" type="button">Refresh</button>
+      </section>
+
+      <div id="approvalList" class="approval-list" aria-live="polite"></div>
+      <p id="emptyState" class="empty hidden">No command approvals are waiting.</p>
+      <p id="appError" class="error" role="alert"></p>
+
+      <section class="panel device-panel">
+        <div>
+          <p class="eyebrow">THIS DEVICE</p>
+          <p class="muted">The pairing token is kept only for this Safari session.</p>
+        </div>
+        <button id="forgetButton" class="button danger-outline" type="button">Forget this device</button>
+      </section>
+    </section>
+  </main>
+
+  <template id="approvalTemplate">
+    <article class="approval-card">
+      <div class="approval-top">
+        <span class="badge waiting">Approval required</span>
+        <time class="created"></time>
+      </div>
+      <div class="field">
+        <span>Command</span>
+        <code class="command"></code>
+      </div>
+      <div class="field cwd-field">
+        <span>Working directory</span>
+        <code class="cwd"></code>
+      </div>
+      <div class="field reason-field">
+        <span>Reason</span>
+        <p class="reason"></p>
+      </div>
+      <div class="actions">
+        <button class="button deny" type="button">Deny</button>
+        <button class="button allow" type="button">Allow once</button>
+      </div>
+      <p class="card-message" role="status"></p>
+    </article>
+  </template>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
