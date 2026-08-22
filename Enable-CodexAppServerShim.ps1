@@ -12,6 +12,14 @@ if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) {
     throw "Shim executable not found: $ShimPath"
 }
 
+if ($Mode -eq 'local-bridge') {
+    $runtimeSecurity = Join-Path $PSScriptRoot 'Initialize-CodexRuntimeSecurity.ps1'
+    if (-not (Test-Path -LiteralPath $runtimeSecurity -PathType Leaf)) {
+        throw "Runtime security initializer not found: $runtimeSecurity"
+    }
+    & $runtimeSecurity
+}
+
 $shimDirectory = Split-Path -Parent $shim
 $modePath = Join-Path $shimDirectory 'CodexAppServerShim.mode'
 
