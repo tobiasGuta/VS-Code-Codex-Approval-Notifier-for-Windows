@@ -14,6 +14,13 @@ using System.Windows.Forms;
 
 internal sealed class CodexRemoteTray : ApplicationContext
 {
+    private sealed class OwnedProcess
+    {
+        public Process Process;
+        public string Role;
+        public volatile bool ExpectedExit;
+    }
+
     private readonly NotifyIcon tray;
     private readonly ToolStripMenuItem statusItem;
     private readonly ToolStripMenuItem enableItem;
@@ -21,8 +28,11 @@ internal sealed class CodexRemoteTray : ApplicationContext
     private readonly ToolStripMenuItem disableItem;
     private readonly string root;
     private readonly JavaScriptSerializer json = new JavaScriptSerializer();
-    private readonly List<Process> owned = new List<Process>();
+    private readonly object ownedSync = new object();
+    private readonly List<OwnedProcess> owned = new List<OwnedProcess>();
     private volatile bool busy;
+    private volatile bool supervisionActive;
+    private volatile bool supervisionFailureHandling;
     private string mobileUrl;
     private string pairingCode;
 
@@ -61,13 +71,19 @@ internal sealed class CodexRemoteTray : ApplicationContext
 
     private void EnableAsync()
     {
-        if (busy || owned.Count > 0) return;
+        lock (ownedSync)
+        {
+            if (busy || owned.Count > 0) return;
+        }
         busy = true; enableItem.Enabled = false; statusItem.Text = "Starting remote approvals...";
         ThreadPool.QueueUserWorkItem(delegate
         {
             try
             {
+                supervisionActive = false;
+                supervisionFailureHandling = false;
                 StartStack();
+                supervisionActive = true;
                 Ui(delegate
                 {
                     statusItem.Text = "Remote approvals are on";
@@ -78,11 +94,13 @@ internal sealed class CodexRemoteTray : ApplicationContext
             }
             catch (Exception ex)
             {
+                supervisionActive = false;
                 StopOwned();
                 Ui(delegate
                 {
+                    mobileUrl = null; pairingCode = null;
                     statusItem.Text = "Remote approvals are off";
-                    enableItem.Enabled = true;
+                    enableItem.Enabled = true; pairItem.Enabled = false; disableItem.Enabled = false;
                     MessageBox.Show(Friendly(ex.Message), "Could not start remote approvals", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 });
             }
@@ -103,20 +121,19 @@ internal sealed class CodexRemoteTray : ApplicationContext
         string ip = FindHomeIpv4();
 
         string companionExe = Path.Combine(root, "companion-build", "CodexLocalCompanion.exe");
-        owned.Add(StartHidden(companionExe, "--descriptor " + Q(bridge) + " --thread " + Q(thread) + " --port 8765", false));
+        StartOwned(companionExe, "--descriptor " + Q(bridge) + " --thread " + Q(thread) + " --port 8765", false, "companion");
         string companion = WaitDescriptor("companion", "companion-*.json", "pid", 10000);
 
         string gatewayExe = Path.Combine(root, "gateway-build", "CodexLanGateway.exe");
-        Process gateway = StartHidden(gatewayExe, "--companion-descriptor " + Q(companion) + " --listen-address " + ip + " --port 8766", true);
-        owned.Add(gateway);
-        pairingCode = ReadLineValue(gateway, "Pairing code:", 10000);
+        OwnedProcess gateway = StartOwned(gatewayExe, "--companion-descriptor " + Q(companion) + " --listen-address " + ip + " --port 8766", true, "LAN gateway");
+        pairingCode = ReadLineValue(gateway.Process, "Pairing code:", 10000);
         string gatewayDescriptor = WaitDescriptor("lan-gateway", "gateway-*.json", "pid", 10000);
         var gd = ReadJson(gatewayDescriptor);
         string gatewayUrl = Convert.ToString(gd["api"]);
 
         string mobileExe = Path.Combine(root, "mobile-build", "CodexMobileUiServer.exe");
         mobileUrl = "http://" + ip + ":8767/";
-        owned.Add(StartHidden(mobileExe, "--listen-address " + ip + " --port 8767 --gateway-base " + Q(gatewayUrl) + " --web-root " + Q(Path.Combine(root, "mobile")), false));
+        StartOwned(mobileExe, "--listen-address " + ip + " --port 8767 --gateway-base " + Q(gatewayUrl) + " --web-root " + Q(Path.Combine(root, "mobile")), false, "mobile UI");
         WaitHttp(mobileUrl, 10000);
     }
 
@@ -163,13 +180,47 @@ internal sealed class CodexRemoteTray : ApplicationContext
         return b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168);
     }
 
-    private Process StartHidden(string file, string args, bool captureOutput)
+    private OwnedProcess StartOwned(string file, string args, bool captureOutput, string role)
     {
         var p = new Process();
         p.StartInfo = new ProcessStartInfo { FileName=file, Arguments=args, WorkingDirectory=root, UseShellExecute=false, CreateNoWindow=true,
             RedirectStandardOutput=captureOutput, RedirectStandardError=captureOutput };
-        if (!p.Start()) throw new InvalidOperationException("A remote-approval component could not be started.");
-        return p;
+        var entry = new OwnedProcess { Process = p, Role = role, ExpectedExit = false };
+        p.EnableRaisingEvents = true;
+        p.Exited += delegate { OnOwnedProcessExited(entry); };
+        if (!p.Start())
+        {
+            p.Dispose();
+            throw new InvalidOperationException("A remote-approval component could not be started.");
+        }
+        lock (ownedSync) { owned.Add(entry); }
+        return entry;
+    }
+
+    private void OnOwnedProcessExited(OwnedProcess entry)
+    {
+        if (entry == null || entry.ExpectedExit || !supervisionActive) return;
+        lock (ownedSync)
+        {
+            if (entry.ExpectedExit || !supervisionActive || supervisionFailureHandling) return;
+            supervisionFailureHandling = true;
+            supervisionActive = false;
+        }
+
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            try { StopOwned(); }
+            finally
+            {
+                mobileUrl = null; pairingCode = null;
+                Ui(delegate
+                {
+                    statusItem.Text = "Remote approvals stopped: " + entry.Role + " exited";
+                    enableItem.Enabled = true; pairItem.Enabled = false; disableItem.Enabled = false;
+                    tray.ShowBalloonTip(3500, "Codex Remote Approvals", "Remote approvals stopped because the " + entry.Role + " process exited.", ToolTipIcon.Warning);
+                });
+            }
+        });
     }
 
     private string ReadLineValue(Process p, string prefix, int timeoutMs)
@@ -255,19 +306,32 @@ internal sealed class CodexRemoteTray : ApplicationContext
 
     private void Disable()
     {
-        if (busy) return; StopOwned(); mobileUrl=null; pairingCode=null;
+        if (busy) return;
+        supervisionActive = false;
+        StopOwned(); mobileUrl=null; pairingCode=null;
         statusItem.Text="Remote approvals are off"; enableItem.Enabled=true; pairItem.Enabled=false; disableItem.Enabled=false;
         tray.ShowBalloonTip(2000,"Codex Remote Approvals","Remote approvals were stopped.",ToolTipIcon.Info);
     }
 
     private void StopOwned()
     {
-        for(int i=owned.Count-1;i>=0;i--){try{if(!owned[i].HasExited) owned[i].Kill();}catch{} try{owned[i].Dispose();}catch{}}
-        owned.Clear();
+        List<OwnedProcess> snapshot;
+        lock (ownedSync)
+        {
+            snapshot = new List<OwnedProcess>(owned);
+            foreach (OwnedProcess entry in snapshot) entry.ExpectedExit = true;
+            owned.Clear();
+        }
+        for(int i=snapshot.Count-1;i>=0;i--)
+        {
+            Process p = snapshot[i].Process;
+            try{if(!p.HasExited) p.Kill();}catch{}
+            try{p.Dispose();}catch{}
+        }
     }
 
-    private void ExitTray(){Disable();tray.Visible=false;tray.Dispose();ExitThread();}
-    protected override void Dispose(bool disposing){if(disposing){StopOwned();tray.Dispose();}base.Dispose(disposing);}
+    private void ExitTray(){supervisionActive=false;Disable();tray.Visible=false;tray.Dispose();ExitThread();}
+    protected override void Dispose(bool disposing){if(disposing){supervisionActive=false;StopOwned();tray.Dispose();}base.Dispose(disposing);}
     private void Ui(MethodInvoker action){if(tray.ContextMenuStrip.InvokeRequired) tray.ContextMenuStrip.BeginInvoke(action); else action();}
     private void RequireFile(string rel){if(!File.Exists(Path.Combine(root,rel))) throw new InvalidOperationException("The app installation is incomplete. Missing " + rel + ".");}
     private void RequireDirectory(string rel){if(!Directory.Exists(Path.Combine(root,rel))) throw new InvalidOperationException("The app installation is incomplete. Missing " + rel + ".");}
