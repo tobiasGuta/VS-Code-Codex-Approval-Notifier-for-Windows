@@ -364,17 +364,14 @@ internal static class CodexAppServerShim
                 WebSocketReceiveResult result;
                 do
                 {
-                    var cts = new CancellationTokenSource();
-                    cts.CancelAfter(60000);
-                    try
-                    {
-                        result = socket.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token)
-                            .GetAwaiter().GetResult();
-                    }
-                    finally
-                    {
-                        cts.Dispose();
-                    }
+                    // An idle app-server connection is healthy. Do not impose a
+                    // per-receive deadline here: VS Code can legitimately leave
+                    // the connection silent for minutes or hours. Shutdown is
+                    // driven by socket close/disposal instead.
+                    result = socket.ReceiveAsync(
+                            new ArraySegment<byte>(buffer),
+                            CancellationToken.None)
+                        .GetAwaiter().GetResult();
 
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
