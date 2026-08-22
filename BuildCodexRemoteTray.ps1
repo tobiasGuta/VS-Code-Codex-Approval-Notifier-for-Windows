@@ -5,9 +5,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$source = Join-Path $PSScriptRoot 'CodexRemoteTray.cs'
-if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-    throw "Tray source not found: $source"
+$sources = @(
+    (Join-Path $PSScriptRoot 'CodexRemoteTray.cs'),
+    (Join-Path $PSScriptRoot 'QrCodeV4.cs')
+)
+foreach ($source in $sources) {
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Tray source not found: $source"
+    }
 }
 
 $cscCandidates = @(
@@ -26,7 +31,7 @@ $output = Join-Path $OutputDirectory 'CodexRemoteTray.exe'
     /r:System.Windows.Forms.dll `
     /r:System.Drawing.dll `
     /r:System.Web.Extensions.dll `
-    $source
+    $sources
 
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $output -PathType Leaf)) {
     throw "Tray compilation failed with exit code $LASTEXITCODE."
