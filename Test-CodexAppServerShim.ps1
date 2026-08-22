@@ -92,11 +92,19 @@ function Invoke-InitializeProbe {
     $start.EnvironmentVariables['CODEX_HOME'] = $CodexHome
     $start.EnvironmentVariables['RUST_LOG'] = 'warn'
     $start.EnvironmentVariables['CODEX_APP_SERVER_MANAGED_CONFIG_PATH'] = (Join-Path $CodexHome 'managed_config.toml')
+
     if ($DisableShimRemoteControl) {
         $start.EnvironmentVariables['CODEX_APPROVAL_NOTIFIER_SHIM_DISABLE_REMOTE_CONTROL_FOR_TESTS'] = '1'
     }
     else {
         $start.EnvironmentVariables.Remove('CODEX_APPROVAL_NOTIFIER_SHIM_DISABLE_REMOTE_CONTROL_FOR_TESTS')
+    }
+
+    if ($ExpectRemoteControlChild) {
+        $start.EnvironmentVariables['CODEX_APPROVAL_NOTIFIER_SHIM_FORCE_REMOTE_CONTROL_FOR_TESTS'] = '1'
+    }
+    else {
+        $start.EnvironmentVariables.Remove('CODEX_APPROVAL_NOTIFIER_SHIM_FORCE_REMOTE_CONTROL_FOR_TESTS')
     }
 
     $process = New-Object System.Diagnostics.Process
@@ -121,7 +129,6 @@ function Invoke-InitializeProbe {
             $remoteControlChildVerified = $true
         }
 
-        # Drain stderr asynchronously so a full stderr pipe can never block the app-server.
         $stderrTask = $process.StandardError.ReadToEndAsync()
 
         $request = [ordered]@{
@@ -170,7 +177,6 @@ function Invoke-InitializeProbe {
             throw "Initialize response has no result from $Path. Response: $line"
         }
 
-        # Ack initialization exactly as Codex's own app-server test client does.
         $initialized = '{"method":"initialized"}'
         $process.StandardInput.WriteLine($initialized)
         $process.StandardInput.Flush()
