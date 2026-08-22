@@ -39,10 +39,19 @@ function Invoke-Build([string]$Script, [hashtable]$Named) {
     if ($LASTEXITCODE -ne 0) { throw "$Script failed.`r`n$($output -join "`r`n")" }
 }
 
+function Decode-JsonPath([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    return $Value.Replace('\','\')
+}
+
+function Encode-JsonPath([string]$Value) {
+    return $Value.Replace('\','\\').Replace('"','\"')
+}
+
 function Get-CliExecutableValue([string]$Text) {
     $m = [regex]::Match($Text, '(?m)^\s*["'']chatgpt\.cliExecutable["'']\s*:\s*["''](?<v>[^"'']+)["'']\s*,?\s*(?://.*)?$')
     if (-not $m.Success) { return $null }
-    return $m.Groups['v'].Value.Replace('\\','\')
+    return Decode-JsonPath $m.Groups['v'].Value
 }
 
 function Is-RecognizedPrototypeShim([string]$Path) {
@@ -67,7 +76,7 @@ function Set-InstallerCliSetting([string]$SettingsPath, [string]$InstalledShim) 
     $text = if (Test-Path -LiteralPath $SettingsPath -PathType Leaf) { [IO.File]::ReadAllText($SettingsPath) } else { "{`r`n}`r`n" }
     $existing = Get-CliExecutableValue $text
     $state = [ordered]@{ previousCliExecutable=$null; added=$false; migrated=$false }
-    $jsonShim = $InstalledShim.Replace('\','\\').Replace('"','\"')
+    $jsonShim = Encode-JsonPath $InstalledShim
 
     if ([string]::IsNullOrWhiteSpace($existing)) {
         $brace = $text.IndexOf('{')
@@ -120,6 +129,12 @@ $startupShortcut = Join-Path $startupDir 'Codex Remote Approvals.lnk'
 $statePath = Join-Path $installDir 'install-state.json'
 
 if (Test-Path -LiteralPath $statePath -PathType Leaf) { throw 'Remote Approvals is already installed. Uninstall it before reinstalling this prototype.' }
+if (Test-Path -LiteralPath $installDir) { throw "Remote Approvals install directory already exists without a valid install state: $installDir" }
+
+$settingsExisted = Test-Path -LiteralPath $settingsPath -PathType Leaf
+$settingsBefore = if ($settingsExisted) { [IO.File]::ReadAllText($settingsPath) } else { $null }
+$settingsChanged = $false
+$installedMoved = $false
 
 try {
     New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
@@ -138,11 +153,12 @@ try {
     Copy-Item -LiteralPath (Join-Path $sourceDir 'mobile') -Destination (Join-Path $stageDir 'mobile') -Recurse -Force
 
     New-Item -ItemType Directory -Path (Split-Path -Parent $installDir) -Force | Out-Null
-    if (Test-Path -LiteralPath $installDir) { Remove-Item -LiteralPath $installDir -Recurse -Force }
     Move-Item -LiteralPath $stageDir -Destination $installDir
+    $installedMoved = $true
 
     $installedShim = Join-Path $installDir 'shim-build\CodexAppServerShim.exe'
     $settingState = Set-InstallerCliSetting $settingsPath $installedShim
+    $settingsChanged = $true
 
     $wsh = New-Object -ComObject WScript.Shell
     $link = $wsh.CreateShortcut($startupShortcut)
@@ -176,6 +192,18 @@ try {
     Write-Host 'Then use the tray icon -> Enable Remote Approvals -> scan the QR code.' -ForegroundColor Cyan
 }
 catch {
+    Remove-Item -LiteralPath $startupShortcut -Force -ErrorAction SilentlyContinue
+    if ($settingsChanged) {
+        try {
+            if ($settingsExisted) {
+                [IO.File]::WriteAllText($settingsPath, $settingsBefore, (New-Object Text.UTF8Encoding($false)))
+            }
+            else {
+                Remove-Item -LiteralPath $settingsPath -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
+    }
+    if ($installedMoved -and (Test-Path -LiteralPath $installDir)) { Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction SilentlyContinue }
     if (Test-Path -LiteralPath $stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue }
     throw
 }
