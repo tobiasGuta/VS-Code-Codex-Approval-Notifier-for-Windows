@@ -49,11 +49,35 @@ function Stop-ProbeProcess {
     }
 }
 
+function Find-ShimChildProcess {
+    param(
+        [Parameter(Mandatory)][int]$ShimProcessId,
+        [int]$TimeoutMilliseconds = 5000
+    )
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        $child = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                [int]$_.ParentProcessId -eq $ShimProcessId -and
+                [string]$_.Name -ieq 'codex.exe'
+            } |
+            Select-Object -First 1
+        if ($null -ne $child) {
+            return $child
+        }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    return $null
+}
+
 function Invoke-InitializeProbe {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$CodexHome,
-        [Parameter(Mandatory)][bool]$DisableShimRemoteControl
+        [Parameter(Mandatory)][bool]$DisableShimRemoteControl,
+        [bool]$ExpectRemoteControlChild = $false
     )
 
     $start = New-Object System.Diagnostics.ProcessStartInfo
@@ -78,9 +102,23 @@ function Invoke-InitializeProbe {
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $start
     $stderrTask = $null
+    $remoteControlChildVerified = $false
+    $remoteControlChildCommandLine = $null
     try {
         if (-not $process.Start()) {
             throw "Failed to start protocol probe: $Path"
+        }
+
+        if ($ExpectRemoteControlChild) {
+            $child = Find-ShimChildProcess -ShimProcessId $process.Id
+            if ($null -eq $child) {
+                throw "Shim child codex.exe was not found for PID $($process.Id)."
+            }
+            $remoteControlChildCommandLine = [string]$child.CommandLine
+            if ($remoteControlChildCommandLine -notmatch '(?i)(^|\s)--remote-control(\s|$)') {
+                throw "Shim child command line did not include --remote-control:`r`n$remoteControlChildCommandLine"
+            }
+            $remoteControlChildVerified = $true
         }
 
         # Drain stderr asynchronously so a full stderr pipe can never block the app-server.
@@ -144,6 +182,8 @@ function Invoke-InitializeProbe {
             CodexHome = [string]$response.result.codexHome
             PlatformFamily = [string]$response.result.platformFamily
             PlatformOs = [string]$response.result.platformOs
+            RemoteControlChildVerified = $remoteControlChildVerified
+            RemoteControlChildCommandLine = $remoteControlChildCommandLine
         }
     }
     finally {
@@ -192,29 +232,46 @@ Write-Host '## Real stdio app-server protocol round-trip'
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('codex-shim-protocol-' + [guid]::NewGuid().ToString('N'))
 $targetHome = Join-Path $tempRoot 'target-home'
 $shimHome = Join-Path $tempRoot 'shim-home'
+$shimRemoteHome = Join-Path $tempRoot 'shim-remote-home'
 New-Item -ItemType Directory -Path $targetHome -Force | Out-Null
 New-Item -ItemType Directory -Path $shimHome -Force | Out-Null
+New-Item -ItemType Directory -Path $shimRemoteHome -Force | Out-Null
 
 try {
     $directProbe = Invoke-InitializeProbe -Path $target -CodexHome $targetHome -DisableShimRemoteControl:$false
     $shimProbe = Invoke-InitializeProbe -Path $shim -CodexHome $shimHome -DisableShimRemoteControl:$true
+    $shimRemoteProbe = Invoke-InitializeProbe -Path $shim -CodexHome $shimRemoteHome -DisableShimRemoteControl:$false -ExpectRemoteControlChild:$true
 
     $userAgentEqual = $directProbe.UserAgent -eq $shimProbe.UserAgent
     $platformFamilyEqual = $directProbe.PlatformFamily -eq $shimProbe.PlatformFamily
     $platformOsEqual = $directProbe.PlatformOs -eq $shimProbe.PlatformOs
     $directHomeCorrect = [IO.Path]::GetFullPath($directProbe.CodexHome) -eq [IO.Path]::GetFullPath($targetHome)
     $shimHomeCorrect = [IO.Path]::GetFullPath($shimProbe.CodexHome) -eq [IO.Path]::GetFullPath($shimHome)
+    $remoteHomeCorrect = [IO.Path]::GetFullPath($shimRemoteProbe.CodexHome) -eq [IO.Path]::GetFullPath($shimRemoteHome)
+    $remoteMetadataEqual =
+        $directProbe.UserAgent -eq $shimRemoteProbe.UserAgent -and
+        $directProbe.PlatformFamily -eq $shimRemoteProbe.PlatformFamily -and
+        $directProbe.PlatformOs -eq $shimRemoteProbe.PlatformOs
 
-    Write-Host "Direct initialize response:    OK"
-    Write-Host "Shim initialize response:      OK"
-    Write-Host "User-agent equal:              $userAgentEqual"
-    Write-Host "Platform family equal:         $platformFamilyEqual"
-    Write-Host "Platform OS equal:             $platformOsEqual"
-    Write-Host "Direct CODEX_HOME preserved:   $directHomeCorrect"
-    Write-Host "Shim CODEX_HOME preserved:     $shimHomeCorrect"
+    Write-Host "Direct initialize response:          OK"
+    Write-Host "Shim initialize response:            OK"
+    Write-Host "User-agent equal:                    $userAgentEqual"
+    Write-Host "Platform family equal:               $platformFamilyEqual"
+    Write-Host "Platform OS equal:                   $platformOsEqual"
+    Write-Host "Direct CODEX_HOME preserved:         $directHomeCorrect"
+    Write-Host "Shim CODEX_HOME preserved:           $shimHomeCorrect"
+    Write-Host ''
+    Write-Host '## Remote-control-enabled app-server round-trip'
+    Write-Host "Shim child --remote-control verified: $($shimRemoteProbe.RemoteControlChildVerified)"
+    Write-Host "Remote initialize response:           OK"
+    Write-Host "Remote metadata equal:                $remoteMetadataEqual"
+    Write-Host "Remote CODEX_HOME preserved:          $remoteHomeCorrect"
 
     if (-not ($userAgentEqual -and $platformFamilyEqual -and $platformOsEqual -and $directHomeCorrect -and $shimHomeCorrect)) {
         throw 'Real app-server protocol passthrough comparison failed.'
+    }
+    if (-not ($shimRemoteProbe.RemoteControlChildVerified -and $remoteMetadataEqual -and $remoteHomeCorrect)) {
+        throw 'Remote-control-enabled app-server protocol acceptance failed.'
     }
 }
 finally {
@@ -222,5 +279,5 @@ finally {
 }
 
 Write-Host ''
-Write-Host 'PASS: CLI/tooling passthrough and real app-server JSON-RPC transport are transparent.'
-Write-Host 'The protocol test used isolated temporary CODEX_HOME directories and did not enable remote control.'
+Write-Host 'PASS: CLI/tooling passthrough, raw stdio JSON-RPC, and --remote-control startup all passed in isolation.'
+Write-Host 'The protocol probes used temporary CODEX_HOME directories and did not change VS Code settings.'
