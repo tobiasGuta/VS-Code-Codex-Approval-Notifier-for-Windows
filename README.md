@@ -1,285 +1,303 @@
 # Codex Approval Notifier for Windows
 
-Native Windows notifications for **Codex approval requests in the VS Code extension**.
+Windows tooling for supervising **Codex approval requests from VS Code**, including native desktop notifications and the V4 **Codex Remote Approvals** companion stack for responding from a phone on your trusted home LAN.
 
-When Codex pauses and waits for permission in VS Code, this utility detects the approval UI and sends a Windows 11 notification. The notification mirrors the approval actions that Codex is currently showing, so you can respond without constantly watching the Codex sidebar.
-
-> **Unofficial project.** This utility is not affiliated with or maintained by OpenAI or Microsoft.
-
-## Why this exists
-
-Codex can pause during a task and wait for an approval such as:
-
-```text
-Deny | Allow once
-```
-
-If you are working in another application, it is easy to miss that Codex is waiting. Codex Approval Notifier watches the VS Code accessibility tree and turns that state into a native Windows notification.
-
-## Features
-
-- Native Windows 11 notifications — Windows renders the notification, not a custom popup.
-- Mirrors the approval actions currently exposed by Codex in VS Code.
-- Does **not** change your Codex approval policy or disable “Ask for approval.”
-- Clicking an approval action re-validates the current Codex prompt before invoking anything.
-- Clicking the notification itself opens/focuses the matching VS Code window.
-- Silent action handling — notification buttons do not flash a PowerShell or terminal window.
-- Starts automatically when you sign in to Windows.
-- Supports multiple VS Code windows.
-- Re-notifies for an approval that remains unanswered for 5 minutes by default.
-- Includes diagnostic and notification-test scripts.
-- No administrator rights required.
-- No third-party notification module required.
-- The notifier itself makes no network requests.
+> **Unofficial project.** This project is not affiliated with or maintained by OpenAI or Microsoft.
 
 ## Current version
 
-**v3.3.1**
+**v4.0.0**
 
-This version uses native Windows notifications, dynamically mirrors Codex approval actions, and uses a small locally built Windows launcher so notification actions run without opening a visible console window.
+V4 adds a separate, fail-closed remote-approval path while preserving the original local Windows notification workflow.
+
+The core V4 design is intentionally narrow:
+
+- one Codex app-server process remains owned by the VS Code session;
+- local helper components attach to that same live process;
+- the phone can only make semantic approval decisions that Codex has already requested;
+- the remote path does not expose an arbitrary shell, arbitrary Codex RPC, file approvals, permission grants, interrupt controls, or prompt injection endpoints.
+
+## V4 architecture
+
+```text
+VS Code
+  |
+  | stdio
+  v
+CodexAppServerShim.exe
+  |
+  | loopback authenticated WebSocket
+  v
+ONE bundled Codex app-server
+  |
+  | second local WebSocket client
+  v
+CodexLocalCompanion.exe        127.0.0.1:8765
+  |
+  | localhost bearer-auth HTTP
+  v
+CodexLanGateway.exe            explicit RFC1918 address:8766
+  |
+  | one-time pairing + device token
+  v
+CodexMobileUiServer.exe        same RFC1918 address:8767
+  |
+  v
+Phone browser
+```
+
+The V4 invariant is: **one app-server owns the live VS Code Codex session; multiple local UIs may observe/control that same process, but V4 never launches a second Codex writer to fake remote access.**
+
+## What V4 can do
+
+- Detect the currently loaded/resumable Codex chat from the live VS Code session.
+- Start a supervised local companion, LAN gateway, mobile UI, and tray controller.
+- Pair one phone using a short-lived one-time six-digit code or QR flow.
+- Show pending native Codex **command execution** approvals on the phone.
+- Accept or decline those approvals using one-time opaque approval handles.
+- Reject stale, replayed, expired, resolved, or wrong-session handles.
+- Automatically decline an approval when its companion-side TTL expires; V4 never auto-accepts.
+- Revoke the current paired device.
+- Tear the local stack down if a tray-owned component exits unexpectedly.
+- Invalidate device/session credentials when the corresponding runtime restarts.
+- Protect runtime credential directories from inherited access by `CodexSandboxUsers` and other unexpected Windows identities.
+
+## Security boundaries
+
+Remote approvals sit on a permission boundary, so conservative behavior is intentional.
+
+V4:
+
+- does **not** change Codex's approval policy;
+- does **not** automatically approve requests;
+- does **not** expose arbitrary command execution over HTTP;
+- does **not** expose arbitrary Codex app-server RPC;
+- does **not** support remote file approvals, permission grants, steering, interrupt, or arbitrary prompt submission;
+- keeps the Codex app-server listener on loopback only;
+- rejects `0.0.0.0` for the LAN gateway;
+- permits only an explicit loopback/RFC1918 listener address;
+- uses a one-time pairing code and an in-memory device token;
+- uses one-time approval handles and rejects stale/replayed decisions;
+- preserves Codex's own approval request IDs and thread identity;
+- fails closed if more than one resumable Codex chat is active;
+- fails closed on stale runtime descriptors or PID reuse;
+- supervises only processes it started and never broadly kills unrelated `codex.exe` processes;
+- stores sensitive bridge/companion tokens only under hardened per-user runtime directories.
+
+The runtime ACL boundary protects credentials from other Windows identities such as Codex sandbox accounts. It does **not** attempt to protect a user's secrets from arbitrary malicious processes already running as that same Windows user.
+
+## Current network limitation
+
+**V4.0.0 uses HTTP on the trusted LAN between the phone and the local mobile/gateway service.**
+
+Pairing and device-token authentication prevent unauthenticated use, but HTTP does not protect traffic from an attacker who can intercept the local network. Do not expose ports 8766 or 8767 to the public Internet, do not configure port forwarding or UPnP for them, and use V4 only on a trusted LAN.
+
+HTTPS is a possible future improvement; it is not part of V4.0.0.
 
 ## Requirements
 
 - Windows 11
 - Visual Studio Code desktop
-- Codex VS Code extension
-- Windows PowerShell 5.1, included with Windows
-- Windows accessibility/UI Automation enabled normally
+- OpenAI Codex VS Code extension
+- x64-compatible Windows environment
+- Windows PowerShell 5.1
+- .NET Framework C# compiler available on Windows for source builds
+- Inno Setup 6 when building the Setup executable from source
+- Phone and PC on the same trusted LAN for remote approvals
 
-PowerShell 7 can be used to launch the installer, but native notification work is hosted through Windows PowerShell 5.1 because of Windows Runtime compatibility.
+Administrator rights are not required for the V4 per-user installation.
 
-## Installation
+## Recommended installation
 
-Download or clone the repository, open PowerShell in the project directory, and run:
+For a packaged release, use `CodexRemoteApprovals-Setup.exe`.
+
+Before installing:
+
+1. Save your work.
+2. Close **all** VS Code windows.
+3. Run the Setup executable as your normal Windows user.
+4. Allow Setup to configure the Codex CLI shim and Start-menu/Startup entries.
+5. Reopen VS Code after installation.
+
+The V4 installed payload is placed under:
+
+```text
+%LOCALAPPDATA%\CodexApprovalNotifier\remote
+```
+
+Sensitive runtime state is kept separately under:
+
+```text
+%LOCALAPPDATA%\CodexApprovalNotifier\local-bridge
+%LOCALAPPDATA%\CodexApprovalNotifier\companion
+%LOCALAPPDATA%\CodexApprovalNotifier\lan-gateway
+```
+
+Those runtime directories are hardened to current-user + `SYSTEM` + `Administrators` FullControl with inheritance from the broader LocalAppData ACL blocked.
+
+## Build the V4 Setup executable from source
+
+Install Inno Setup 6, then from the repository root run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\Build-CodexRemoteApprovalsSetup.ps1
+```
+
+The build script compiles the bundled C# components, creates the installer payload, invokes Inno Setup, and prints the SHA-256 of the resulting Setup executable.
+
+Expected output location:
+
+```text
+setup-output\CodexRemoteApprovals-Setup.exe
+```
+
+## Normal V4 usage
+
+After installation:
+
+1. Open VS Code and open the single Codex chat you want to supervise.
+2. Start **Codex Remote Approvals** from the tray/Startup entry if it is not already running.
+3. Open the tray menu and choose **Enable Remote Approvals**.
+4. The tray validates the live Codex bridge and starts the companion, LAN gateway, and mobile UI.
+5. Choose **Pair Phone** and scan the locally generated QR code.
+6. Use the phone page to review pending command approvals and choose **Accept** or **Decline**.
+7. Use **Disable Remote Approvals** when remote access is no longer needed.
+
+If more than one resumable Codex chat exists, V4 intentionally refuses to guess which one should be remotely controlled. Close the extra Codex chats/windows and enable again.
+
+## Pairing behavior
+
+- Pairing code: six digits.
+- Pairing lifetime: five minutes.
+- Pairing code: single use.
+- Failed attempts: rate-limited per source IP.
+- Device credential: random 256-bit token kept in gateway memory.
+- Gateway restart: invalidates the old device token and pairing state.
+- Current V4 prototype supports one paired device at a time.
+- QR generation is local; the pairing secret is placed in the URL fragment so it is handled client-side and scrubbed before the pairing POST.
+
+## Approval lifecycle
+
+The local companion is authoritative for approval freshness.
+
+Pending command approvals receive opaque one-time handles. The default approval TTL is five minutes. If an approval expires, the companion removes the phone-decidable handle and sends the exact native **decline** response for that request. A failed decline send is retried rather than converted into an accept.
+
+Completed, resolved, stale, expired, or replayed handles are rejected.
+
+## Runtime lifecycle hardening
+
+V4 includes several reliability/security protections discovered during acceptance testing:
+
+- The shim owns the exact Codex child in a Windows Job Object using kill-on-close semantics.
+- A cleanup guardian waits on the exact shim process handle and removes only that shim's descriptor/token artifacts after abnormal termination.
+- Bridge descriptors include process identity and creation time and are rejected when the PID belongs to a newer process instance.
+- The thread selector and companion launcher preserve sub-second descriptor timestamps so legitimate same-second process startup is not mistaken for PID reuse.
+- Companion and gateway restarts invalidate prior credentials/handles.
+- The tray supervises only its own companion/gateway/mobile children and tears down the remaining stack if one exits unexpectedly.
+- Runtime credential directories block inherited LocalAppData ACLs, removing the previously inherited `CodexSandboxUsers` read path.
+- New runtime files inherit only the protected runtime-directory DACL.
+- Stale matching runtime artifacts are cleaned up without deleting unrelated files.
+
+## V4 runtime components
+
+```text
+CodexAppServerShim.cs / shim-build\CodexAppServerShim.exe
+    VS Code CLI shim. Keeps the real Codex app-server loopback-only and publishes
+    a local authenticated bridge descriptor/token.
+
+Select-CodexLiveThread.ps1
+    Validates the bridge identity and selects exactly one live resumable Codex chat.
+
+CodexLocalCompanion.cs / companion-build\CodexLocalCompanion.exe
+    Loopback-only approval lifecycle service. Tracks native command approvals,
+    TTLs, one-time handles, resolution, and accept/decline decisions.
+
+CodexLanGateway.cs / gateway-build\CodexLanGateway.exe
+    Explicit trusted-LAN listener. Owns pairing/device-token authentication and
+    proxies only the narrow status/approval API to the local companion.
+
+CodexMobileUiServer.cs / mobile-build\CodexMobileUiServer.exe
+    Serves the phone UI and same-origin gateway proxy. It does not receive the
+    Codex app-server or companion bearer token.
+
+CodexRemoteTray.cs / tray-build\CodexRemoteTray.exe
+    Windows tray controller for enable/pair/disable/status plus owned-process
+    supervision.
+
+Initialize-CodexRuntimeSecurity.ps1
+    Applies and verifies runtime credential-directory ACL policy and stale-artifact
+    cleanup.
+
+Configure-InstalledRemoteApprovals.ps1
+Unconfigure-InstalledRemoteApprovals.ps1
+    Installer-owned VS Code shim configuration and safe rollback.
+
+Build-CodexRemoteApprovalsSetup.ps1
+installer\CodexRemoteApprovals.iss
+    Builds the per-user V4 Setup executable.
+```
+
+## Uninstall V4
+
+Save your work and close **all** VS Code windows before uninstalling. This is required so the installer can safely restore the previous Codex CLI setting.
+
+Use Windows **Installed apps / Add or Remove Programs** and uninstall **Codex Remote Approvals**.
+
+The uninstaller runs the owned rollback logic before removing the installed payload. It refuses to guess how to restore a VS Code CLI setting it does not own.
+
+## Legacy local Windows notifier
+
+The original Windows notification implementation remains in the repository:
+
+```text
+CodexApprovalNotifier.ps1
+Common.ps1
+HandleAction.ps1
+ActionLauncher.cs
+Install.ps1
+Uninstall.ps1
+Test-Notification.ps1
+Diagnose.ps1
+```
+
+That workflow watches the VS Code accessibility tree and mirrors the approval buttons into native Windows notifications. It is separate from the V4 phone/LAN architecture and retains its existing limitations, including reduced reliability when the VS Code window is minimized and dependence on Codex/VS Code accessibility labels.
+
+To install the legacy local notifier from source:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\Install.ps1
 ```
 
-The installer places the runtime files in:
-
-```text
-%LOCALAPPDATA%\CodexApprovalNotifier
-```
-
-It also creates:
-
-- a Start-menu shortcut used as the Windows notification identity;
-- a Startup shortcut so the watcher starts when you sign in;
-- a per-user `codexapproval:` protocol handler for notification actions;
-- `ActionLauncher.exe`, compiled locally from the included `ActionLauncher.cs` source.
-
-The launcher exists only to start the action handler invisibly so clicking a notification button does not flash a console window.
-
-## Test the notification
-
-After installation:
-
-```powershell
-.\Test-Notification.ps1
-```
-
-This sends a native Windows test notification. The test uses sample `Allow once` and `Deny` buttons only to preview the UI.
-
-**Real approval notifications do not hard-code those choices.** They mirror the actions currently exposed by Codex in VS Code.
-
-## Normal usage
-
-There is nothing to run manually after installation.
-
-1. Start VS Code normally.
-2. Use Codex normally.
-3. When Codex displays an approval request, the watcher detects it.
-4. Windows displays a native `Command approval` notification.
-5. Choose one of the actions shown by Codex, or click the notification to return to VS Code.
-
-For example, if Codex currently exposes:
-
-```text
-Deny | Allow once
-```
-
-the Windows notification exposes those same actions.
-
-The project does not invent an `Approve for session` option or any other permission level that Codex is not currently showing.
-
-## Safety behavior
-
-Notification actions are intentionally fail-closed.
-
-Before an action is invoked, the handler checks that:
-
-- the original VS Code process still exists;
-- the original window handle still matches;
-- a Codex approval is still present;
-- the current approval-action set still matches the set captured when the notification was created;
-- the selected action exists exactly once.
-
-If those checks fail, the notifier does not approve or deny anything. It can instead bring VS Code forward so the request can be reviewed manually.
-
-The notifier never automatically approves a request just because one appears.
-
-## Diagnostics
-
-If an approval is visible in VS Code but no notification appears, leave the approval open and run:
-
-```powershell
-.\Diagnose.ps1
-```
-
-A working detection should look similar to:
-
-```text
-Approval pattern detected: True
-Approval actions mirrored to notification: Deny | Allow once
-```
-
-The diagnostic output is useful when a VS Code or Codex update changes the accessibility tree.
-
-## Logs
-
-Runtime logs are written locally to:
-
-```text
-%LOCALAPPDATA%\CodexApprovalNotifier\watcher.log
-```
-
-Temporary notification-action records are kept under:
-
-```text
-%LOCALAPPDATA%\CodexApprovalNotifier\actions
-```
-
-These records allow a notification click to be matched back to the VS Code window and approval state that originally produced it. Expired/stale actions are ignored.
-
-## Uninstall
-
-Run:
-
-```powershell
-.\Uninstall.ps1
-```
-
-The uninstaller stops the watcher and removes the installed runtime directory, Startup shortcut, notification identity shortcut, and per-user `codexapproval:` protocol registration.
-
-## Current limitations
-
-### 1. Minimized VS Code windows
-
-This is the main known limitation right now.
-
-When a VS Code window is **minimized**, the Codex/Electron accessibility subtree may stop exposing the approval controls to Windows UI Automation. The watcher can still see the VS Code process/window, but it may no longer see entries such as:
-
-```text
-Approval options
-Allow once
-Deny
-```
-
-As a result, an approval that appears while VS Code is minimized may **not generate a notification until VS Code is restored**.
-
-This has been reproduced during testing. The project intentionally does not auto-restore minimized VS Code windows just to make the detector work.
-
-### 2. Depends on the Codex/VS Code accessibility tree
-
-Detection currently relies on Windows UI Automation and the accessible controls exposed by VS Code/Codex. A future Codex or VS Code UI change can rename, regroup, or stop exposing these controls and temporarily break detection.
-
-`Diagnose.ps1` is included specifically to help identify this kind of compatibility break.
-
-### 3. Approval-action recognition is label based
-
-The notifier requires an `Approval options` accessibility anchor and looks for approval-style action labels such as `Allow`, `Approve`, `Deny`, `Decline`, `Reject`, or `Always allow`.
-
-The exact labels are preserved in the notification, but a completely new wording introduced by a future Codex version may need to be added to the recognizer.
-
-### 4. The notification body is intentionally generic
-
-The current version tells you that Codex is waiting for approval and includes the VS Code window title. It does **not yet reliably copy the full human-readable approval question/command into the Windows notification**.
-
-The actionable choices are the important part that is mirrored today.
-
-### 5. Polling, not an official Codex event API
-
-The watcher currently checks VS Code roughly every **1.2 seconds** using UI Automation. It is not subscribed to an official Codex approval event or hook.
-
-Because of that, visibility and accessibility-tree behavior affect detection.
-
-### 6. Windows only
-
-This implementation uses Windows UI Automation, Windows Runtime toast APIs, Start-menu notification identity registration, and a Windows protocol handler. macOS and Linux are not supported by this version.
-
-### 7. Windows notification settings still apply
-
-Focus/Do Not Disturb settings, disabled notifications, or other Windows notification policies can affect whether or how the toast is displayed.
-
-### 8. Stale notifications intentionally stop working
-
-A notification is tied to the approval state that existed when it was created. If Codex moves on, VS Code restarts, the window changes, or the approval options change, an old notification action is rejected rather than acting on a different request.
-
-This is intentional safety behavior, not a bug.
-
-## How it works
-
-```text
-Codex approval appears in VS Code
-             |
-             v
-Windows UI Automation reads Codex controls
-             |
-             v
-Approval options + current actions detected
-             |
-             v
-Native Windows toast is created
-             |
-      +------+------+
-      |             |
-      v             v
- click action    click toast
-      |             |
-      v             v
-silent action    focus VS Code
-launcher
-      |
-      v
-re-check same VS Code window + approval state
-      |
-      v
-invoke the matching Codex UI action
-```
-
-## Project files
-
-```text
-ActionLauncher.cs             Small no-console launcher for notification actions
-BuildActionLauncher.ps1       Builds ActionLauncher.exe locally
-CodexApprovalNotifier.ps1     Main watcher and native notification logic
-Common.ps1                    UI Automation, action validation, and shared helpers
-Diagnose.ps1                  Prints accessible VS Code controls and detection state
-HandleAction.ps1              Handles clicks from native Windows notifications
-Install.ps1                   Installs/registers/starts the notifier
-Test-Notification.ps1         Sends a native test notification
-Uninstall.ps1                 Removes the notifier and its user-level registrations
-README.md                     Project documentation
-```
-
-## Security notes
-
-This tool interacts with an approval boundary, so conservative behavior is intentional.
-
-- It does not disable Codex approval prompts.
-- It does not change your Codex permission configuration.
-- It does not automatically choose an approval action.
-- It rechecks the approval immediately before invoking a button.
-- Notification actions are tied to the originating VS Code process/window.
-- Unknown, expired, or stale actions are ignored.
-- `ActionLauncher.exe` is built on the local machine from source during installation.
-
-You should still read approval requests before allowing commands you do not understand or trust.
-
-## Status
-
-The current implementation is working for the intended everyday workflow: **VS Code open/not minimized, Codex waiting for approval, native Windows notification, and approval response directly from the notification**.
-
-The minimized-window behavior documented above is accepted as a known limitation for now.
+## V4 acceptance status
+
+V4.0.0 was accepted against the intended home-LAN workflow with:
+
+- real VS Code + Codex live bridge startup;
+- exact live-thread selection;
+- phone QR pairing;
+- mobile approval flow;
+- real prompt/approval interaction;
+- restart/session invalidation;
+- approval expiry/automatic decline behavior;
+- shim abnormal-exit child cleanup;
+- tray-owned stack supervision;
+- stale/PID-reuse descriptor rejection;
+- same-second timestamp precision regression coverage;
+- non-admin runtime ACL initialization;
+- idempotent ACL initialization;
+- safe inheritance for future runtime files;
+- stale credential cleanup.
+
+## What is intentionally not in V4.0.0
+
+The following are possible future work, not incomplete V4 requirements:
+
+- HTTPS for LAN traffic;
+- persistent multi-device pairing;
+- a broader local audit-log experience;
+- additional reconnect/concurrency stress testing;
+- remote steering, interrupt, arbitrary prompts, arbitrary RPC, or arbitrary shell execution.
+
+The last group is intentionally excluded from the V4 security model rather than merely postponed.
