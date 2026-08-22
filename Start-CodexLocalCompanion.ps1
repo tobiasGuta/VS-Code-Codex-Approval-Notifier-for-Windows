@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory)][string]$ThreadId,
     [int]$Port = 8765,
+    [ValidateRange(5, 3600)][int]$ApprovalTtlSeconds = 300,
     [string]$CompanionPath = (Join-Path $PSScriptRoot 'companion-build\CodexLocalCompanion.exe'),
     [string]$DescriptorPath
 )
@@ -37,10 +38,11 @@ if ([string]::IsNullOrWhiteSpace($DescriptorPath) -or -not (Test-Path -LiteralPa
 $DescriptorPath = (Resolve-Path -LiteralPath $DescriptorPath).Path
 
 Write-Host 'Starting Codex Local Companion...'
-Write-Host "Thread:     $ThreadId"
-Write-Host "Bridge:     $DescriptorPath"
-Write-Host "HTTP port:  $Port"
+Write-Host "Thread:       $ThreadId"
+Write-Host "Bridge:       $DescriptorPath"
+Write-Host "HTTP port:    $Port"
+Write-Host "Approval TTL: $ApprovalTtlSeconds seconds"
 Write-Host ''
 
-& $CompanionPath --descriptor $DescriptorPath --thread $ThreadId --port $Port
+& $CompanionPath --descriptor $DescriptorPath --thread $ThreadId --port $Port --approval-ttl-seconds $ApprovalTtlSeconds
 exit $LASTEXITCODE
