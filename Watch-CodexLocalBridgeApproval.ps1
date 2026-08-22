@@ -246,7 +246,6 @@ try {
                 $text = Receive-WebSocketText -Socket $socket -TimeoutMilliseconds $remaining
             }
             catch [System.OperationCanceledException] { break }
-            catch [System.Threading.Tasks.TaskCanceledException] { break }
 
             $message = $text | ConvertFrom-Json -ErrorAction Stop
             if (Test-ApprovalForThread -Message $message) {
