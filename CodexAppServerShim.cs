@@ -10,6 +10,7 @@ internal static class CodexAppServerShim
     private const string TargetFileName = "CodexAppServerShim.target";
     private const string TargetOverrideEnvironmentVariable = "CODEX_APPROVAL_NOTIFIER_SHIM_TARGET";
     private const string ActiveEnvironmentVariable = "CODEX_APPROVAL_NOTIFIER_SHIM_ACTIVE";
+    private const string DisableRemoteControlForTestsEnvironmentVariable = "CODEX_APPROVAL_NOTIFIER_SHIM_DISABLE_REMOTE_CONTROL_FOR_TESTS";
 
     private static readonly HashSet<string> AppServerToolingSubcommands =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -174,6 +175,14 @@ internal static class CodexAppServerShim
 
     private static bool ShouldEnableRemoteControl(IList<string> args)
     {
+        if (string.Equals(
+            Environment.GetEnvironmentVariable(DisableRemoteControlForTestsEnvironmentVariable),
+            "1",
+            StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         if (args == null || args.Count == 0)
         {
             return false;
