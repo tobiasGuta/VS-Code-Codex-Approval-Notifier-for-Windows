@@ -9,6 +9,24 @@ function Get-BridgeRuntimeDirectory {
     return (Join-Path $env:LOCALAPPDATA 'CodexApprovalNotifier\local-bridge')
 }
 
+function Convert-DescriptorCreatedAtToDateTimeOffset($Value) {
+    if ($null -eq $Value) { throw 'Bridge descriptor is missing createdAt.' }
+
+    # PowerShell versions may materialize an ISO JSON date as DateTime instead of
+    # leaving it as a string. Casting that DateTime to [string] is lossy: the
+    # culture-formatted result can drop fractional seconds and falsely make a live
+    # process appear newer than its descriptor. Preserve the typed value directly.
+    if ($Value -is [DateTimeOffset]) { return [DateTimeOffset]$Value }
+    if ($Value -is [DateTime]) { return [DateTimeOffset]([DateTime]$Value) }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) { throw 'Bridge descriptor is missing createdAt.' }
+    return [DateTimeOffset]::Parse(
+        $text,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind)
+}
+
 function Test-BridgeDescriptorIdentity {
     param(
         [Parameter(Mandatory)]$Descriptor,
@@ -21,9 +39,7 @@ function Test-BridgeDescriptorIdentity {
         $codexPid = [int]$Descriptor.codexPid
         if ($shimPid -le 0 -or $codexPid -le 0) { throw 'Bridge descriptor contains an invalid process id.' }
 
-        $createdText = [string]$Descriptor.createdAt
-        if ([string]::IsNullOrWhiteSpace($createdText)) { throw 'Bridge descriptor is missing createdAt.' }
-        $createdAt = [DateTimeOffset]::Parse($createdText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        $createdAt = Convert-DescriptorCreatedAtToDateTimeOffset $Descriptor.createdAt
 
         $runtimeDir = [IO.Path]::GetFullPath((Get-BridgeRuntimeDirectory)).TrimEnd('\')
         $actualDescriptor = [IO.Path]::GetFullPath($Path)
@@ -45,10 +61,10 @@ function Test-BridgeDescriptorIdentity {
         $shimStarted = [DateTimeOffset]$shim.StartTime
         $codexStarted = [DateTimeOffset]$codex.StartTime
 
-        if ($shimStarted -gt $createdAt) {
+        if ($shimStarted.UtcDateTime -gt $createdAt.UtcDateTime) {
             throw 'Bridge shim PID belongs to a process that started after the descriptor was created.'
         }
-        if ($codexStarted -gt $createdAt) {
+        if ($codexStarted.UtcDateTime -gt $createdAt.UtcDateTime) {
             throw 'Bridge Codex PID belongs to a process that started after the descriptor was created.'
         }
 
