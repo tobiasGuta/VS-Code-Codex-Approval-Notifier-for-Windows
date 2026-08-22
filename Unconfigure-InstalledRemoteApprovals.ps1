@@ -42,6 +42,7 @@ try {
 
     $InstallDir = [IO.Path]::GetFullPath($InstallDir)
     $statePath = Join-Path $InstallDir 'install-state.json'
+    $targetPath = Join-Path $InstallDir 'shim-build\CodexAppServerShim.target'
     if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
         Write-SetupLog 'No installer ownership state exists; nothing to restore.'
         exit 0
@@ -96,7 +97,13 @@ try {
         }
     }
 
-    Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
+        Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+        Write-SetupLog 'Generated Codex shim target removed.'
+    }
+
+    Remove-Item -LiteralPath $statePath -Force -ErrorAction Stop
+    Write-SetupLog 'Installer ownership state removed.'
     Write-SetupLog 'Rollback completed successfully.'
     exit 0
 }
