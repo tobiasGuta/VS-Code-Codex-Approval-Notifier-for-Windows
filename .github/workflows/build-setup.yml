@@ -1,0 +1,42 @@
+name: Build Codex Remote Approvals Setup
+
+on:
+  push:
+    branches:
+      - prototype/setup-exe
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-setup:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: |
+          choco install innosetup --no-progress -y
+
+      - name: Build Setup executable
+        shell: powershell
+        run: |
+          .\Build-CodexRemoteApprovalsSetup.ps1
+
+      - name: Show Setup hash
+        shell: powershell
+        run: |
+          Get-FileHash .\setup-output\CodexRemoteApprovals-Setup.exe -Algorithm SHA256 | Format-List
+
+      - name: Upload Setup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexRemoteApprovals-Setup
+          path: setup-output/CodexRemoteApprovals-Setup.exe
+          if-no-files-found: error
+          retention-days: 14
