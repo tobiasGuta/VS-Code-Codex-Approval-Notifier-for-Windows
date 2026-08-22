@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -34,24 +35,27 @@ internal static class CodexLocalCompanion
     private static ClientWebSocket AppSocket;
     private static string ThreadId;
     private static string ApiToken;
-    private static HttpListener Listener;
+    private static TcpListener ApiListener;
     private static volatile bool Stopping;
 
     private static int Main(string[] args)
     {
+        string apiDescriptorFile = null;
+        string apiTokenFile = null;
         try
         {
             var parsed = ParseArgs(args);
             string descriptorPath = Require(parsed, "descriptor");
             ThreadId = Require(parsed, "thread");
             int port = parsed.ContainsKey("port") ? int.Parse(parsed["port"]) : 8765;
+            if (port < 1 || port > 65535) throw new ArgumentOutOfRangeException("port");
             string runtimeDir = parsed.ContainsKey("runtime-dir")
                 ? parsed["runtime-dir"]
                 : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexApprovalNotifier", "companion");
 
             Directory.CreateDirectory(runtimeDir);
-            string apiTokenFile = Path.Combine(runtimeDir, "companion-" + Process.GetCurrentProcess().Id + ".token");
-            string apiDescriptorFile = Path.Combine(runtimeDir, "companion-" + Process.GetCurrentProcess().Id + ".json");
+            apiTokenFile = Path.Combine(runtimeDir, "companion-" + Process.GetCurrentProcess().Id + ".token");
+            apiDescriptorFile = Path.Combine(runtimeDir, "companion-" + Process.GetCurrentProcess().Id + ".json");
 
             IDictionary descriptor = ReadJsonObject(descriptorPath);
             string wsUri = Convert.ToString(descriptor["uri"]);
@@ -73,14 +77,14 @@ internal static class CodexLocalCompanion
 
             ApiToken = CreateToken();
             File.WriteAllText(apiTokenFile, ApiToken + Environment.NewLine, new UTF8Encoding(false));
-            string apiBase = "http://127.0.0.1:" + port + "/";
+
+            ApiListener = new TcpListener(IPAddress.Loopback, port);
+            ApiListener.Start();
+            int actualPort = ((IPEndPoint)ApiListener.LocalEndpoint).Port;
+            string apiBase = "http://127.0.0.1:" + actualPort + "/";
             WriteCompanionDescriptor(apiDescriptorFile, apiBase, apiTokenFile, descriptorPath, ThreadId);
 
             Thread receiveThread = StartBackgroundThread(ReceiveLoop, "CodexCompanion-AppServerReceive");
-
-            Listener = new HttpListener();
-            Listener.Prefixes.Add(apiBase);
-            Listener.Start();
 
             Console.WriteLine("Codex Local Companion started.");
             Console.WriteLine("Thread:     " + ThreadId);
@@ -93,21 +97,19 @@ internal static class CodexLocalCompanion
             {
                 while (!Stopping)
                 {
-                    HttpListenerContext context;
-                    try { context = Listener.GetContext(); }
-                    catch (HttpListenerException) { if (Stopping) break; throw; }
+                    TcpClient client;
+                    try { client = ApiListener.AcceptTcpClient(); }
+                    catch (SocketException) { if (Stopping) break; throw; }
                     catch (ObjectDisposedException) { break; }
-                    ThreadPool.QueueUserWorkItem(_ => HandleHttp(context));
+                    ThreadPool.QueueUserWorkItem(_ => HandleHttp(client));
                 }
             }
             finally
             {
                 Stopping = true;
-                try { Listener.Stop(); } catch { }
+                try { ApiListener.Stop(); } catch { }
                 try { AppSocket.Dispose(); } catch { }
                 try { receiveThread.Join(1500); } catch { }
-                SafeDelete(apiDescriptorFile);
-                SafeDelete(apiTokenFile);
             }
 
             return 0;
@@ -116,6 +118,14 @@ internal static class CodexLocalCompanion
         {
             Console.Error.WriteLine("Codex Local Companion failed: " + ex.Message);
             return 90;
+        }
+        finally
+        {
+            Stopping = true;
+            try { if (ApiListener != null) ApiListener.Stop(); } catch { }
+            try { if (AppSocket != null) AppSocket.Dispose(); } catch { }
+            SafeDelete(apiDescriptorFile);
+            SafeDelete(apiTokenFile);
         }
     }
 
@@ -170,7 +180,7 @@ internal static class CodexLocalCompanion
             {
                 Console.Error.WriteLine("App-server receive loop stopped: " + ex.Message);
                 Stopping = true;
-                try { Listener.Stop(); } catch { }
+                try { ApiListener.Stop(); } catch { }
             }
         }
     }
@@ -216,78 +226,113 @@ internal static class CodexLocalCompanion
         }
     }
 
-    private static void HandleHttp(HttpListenerContext context)
+    private static void HandleHttp(TcpClient client)
     {
-        try
+        using (client)
         {
-            if (!IsAuthorized(context.Request))
+            try
             {
-                WriteJson(context.Response, 401, new Dictionary<string, object> { { "error", "unauthorized" } });
-                return;
-            }
+                client.ReceiveTimeout = 5000;
+                client.SendTimeout = 5000;
+                NetworkStream stream = client.GetStream();
+                var reader = new StreamReader(stream, Encoding.ASCII, false, 4096, true);
 
-            string path = context.Request.Url.AbsolutePath.TrimEnd('/');
-            string method = context.Request.HttpMethod.ToUpperInvariant();
-
-            if (method == "GET" && (path == "" || path == "/health"))
-            {
-                WriteJson(context.Response, 200, new Dictionary<string, object>
+                string requestLine = reader.ReadLine();
+                if (string.IsNullOrWhiteSpace(requestLine)) return;
+                string[] requestParts = requestLine.Split(' ');
+                if (requestParts.Length != 3)
                 {
-                    { "ok", true }, { "threadId", ThreadId }, { "pendingCount", PendingCount() }
-                });
-                return;
-            }
-
-            if (method == "GET" && path == "/api/status")
-            {
-                WriteJson(context.Response, 200, new Dictionary<string, object>
-                {
-                    { "connected", AppSocket != null && AppSocket.State == WebSocketState.Open },
-                    { "threadId", ThreadId },
-                    { "pendingCount", PendingCount() }
-                });
-                return;
-            }
-
-            if (method == "GET" && path == "/api/approvals")
-            {
-                WriteJson(context.Response, 200, new Dictionary<string, object> { { "data", SnapshotPending() } });
-                return;
-            }
-
-            if (method == "POST" && path.StartsWith("/api/approvals/", StringComparison.Ordinal))
-            {
-                string[] parts = path.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length == 4 && string.Equals(parts[0], "api", StringComparison.Ordinal) && string.Equals(parts[1], "approvals", StringComparison.Ordinal))
-                {
-                    string handle = parts[2];
-                    string decision = parts[3];
-                    if (decision != "accept" && decision != "decline")
-                    {
-                        WriteJson(context.Response, 404, new Dictionary<string, object> { { "error", "not_found" } });
-                        return;
-                    }
-                    ResolveApproval(context.Response, handle, decision);
+                    WriteHttpJson(stream, 400, new Dictionary<string, object> { { "error", "bad_request" } });
                     return;
                 }
-            }
 
-            WriteJson(context.Response, 404, new Dictionary<string, object> { { "error", "not_found" } });
-        }
-        catch (Exception ex)
-        {
-            try { WriteJson(context.Response, 500, new Dictionary<string, object> { { "error", "internal_error" }, { "message", ex.Message } }); } catch { }
+                string method = requestParts[0].ToUpperInvariant();
+                string rawTarget = requestParts[1];
+                Uri targetUri;
+                if (!Uri.TryCreate("http://127.0.0.1" + rawTarget, UriKind.Absolute, out targetUri))
+                {
+                    WriteHttpJson(stream, 400, new Dictionary<string, object> { { "error", "bad_request" } });
+                    return;
+                }
+                string path = targetUri.AbsolutePath.TrimEnd('/');
+
+                var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                while (true)
+                {
+                    string line = reader.ReadLine();
+                    if (line == null || line.Length == 0) break;
+                    int colon = line.IndexOf(':');
+                    if (colon <= 0) continue;
+                    headers[line.Substring(0, colon).Trim()] = line.Substring(colon + 1).Trim();
+                }
+
+                if (!IsAuthorized(headers))
+                {
+                    WriteHttpJson(stream, 401, new Dictionary<string, object> { { "error", "unauthorized" } });
+                    return;
+                }
+
+                if (method == "GET" && (path == "" || path == "/health"))
+                {
+                    WriteHttpJson(stream, 200, new Dictionary<string, object>
+                    {
+                        { "ok", true }, { "threadId", ThreadId }, { "pendingCount", PendingCount() }
+                    });
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/status")
+                {
+                    WriteHttpJson(stream, 200, new Dictionary<string, object>
+                    {
+                        { "connected", AppSocket != null && AppSocket.State == WebSocketState.Open },
+                        { "threadId", ThreadId },
+                        { "pendingCount", PendingCount() }
+                    });
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/approvals")
+                {
+                    WriteHttpJson(stream, 200, new Dictionary<string, object> { { "data", SnapshotPending() } });
+                    return;
+                }
+
+                if (method == "POST" && path.StartsWith("/api/approvals/", StringComparison.Ordinal))
+                {
+                    string[] parts = path.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length == 4 && string.Equals(parts[0], "api", StringComparison.Ordinal) && string.Equals(parts[1], "approvals", StringComparison.Ordinal))
+                    {
+                        string handle = parts[2];
+                        string decision = parts[3];
+                        if (decision != "accept" && decision != "decline")
+                        {
+                            WriteHttpJson(stream, 404, new Dictionary<string, object> { { "error", "not_found" } });
+                            return;
+                        }
+                        ResolveApproval(stream, handle, decision);
+                        return;
+                    }
+                }
+
+                WriteHttpJson(stream, 404, new Dictionary<string, object> { { "error", "not_found" } });
+            }
+            catch (IOException) { }
+            catch (Exception ex)
+            {
+                try { WriteHttpJson(client.GetStream(), 500, new Dictionary<string, object> { { "error", "internal_error" }, { "message", ex.Message } }); } catch { }
+            }
         }
     }
 
-    private static void ResolveApproval(HttpListenerResponse response, string handle, string decision)
+    private static void ResolveApproval(NetworkStream stream, string handle, string decision)
     {
         PendingApproval approval;
         lock (Sync)
         {
             if (!PendingByHandle.TryGetValue(handle, out approval))
             {
-                WriteJson(response, 409, new Dictionary<string, object> { { "error", "stale_or_resolved" } });
+                WriteHttpJson(stream, 409, new Dictionary<string, object> { { "error", "stale_or_resolved" } });
                 return;
             }
             PendingByHandle.Remove(handle);
@@ -301,7 +346,7 @@ internal static class CodexLocalCompanion
                 { "id", approval.RequestId },
                 { "result", new Dictionary<string, object> { { "decision", decision } } }
             });
-            WriteJson(response, 200, new Dictionary<string, object>
+            WriteHttpJson(stream, 200, new Dictionary<string, object>
             {
                 { "ok", true }, { "handle", handle }, { "decision", decision }
             });
@@ -318,9 +363,10 @@ internal static class CodexLocalCompanion
         }
     }
 
-    private static bool IsAuthorized(HttpListenerRequest request)
+    private static bool IsAuthorized(IDictionary<string, string> headers)
     {
-        string header = request.Headers["Authorization"];
+        string header;
+        if (!headers.TryGetValue("Authorization", out header)) return false;
         if (string.IsNullOrWhiteSpace(header) || !header.StartsWith("Bearer ", StringComparison.Ordinal)) return false;
         string supplied = header.Substring("Bearer ".Length).Trim();
         return FixedTimeEquals(ApiToken, supplied);
@@ -449,15 +495,19 @@ internal static class CodexLocalCompanion
         return d;
     }
 
-    private static void WriteJson(HttpListenerResponse response, int status, object body)
+    private static void WriteHttpJson(NetworkStream stream, int status, object body)
     {
-        byte[] bytes = Encoding.UTF8.GetBytes(Json.Serialize(body));
-        response.StatusCode = status;
-        response.ContentType = "application/json; charset=utf-8";
-        response.ContentLength64 = bytes.Length;
-        response.Headers["Cache-Control"] = "no-store";
-        response.OutputStream.Write(bytes, 0, bytes.Length);
-        response.OutputStream.Close();
+        byte[] bodyBytes = Encoding.UTF8.GetBytes(Json.Serialize(body));
+        string reason = status == 200 ? "OK" : status == 400 ? "Bad Request" : status == 401 ? "Unauthorized" : status == 404 ? "Not Found" : status == 409 ? "Conflict" : "Internal Server Error";
+        string headers = "HTTP/1.1 " + status + " " + reason + "\r\n" +
+            "Content-Type: application/json; charset=utf-8\r\n" +
+            "Content-Length: " + bodyBytes.Length + "\r\n" +
+            "Cache-Control: no-store\r\n" +
+            "Connection: close\r\n\r\n";
+        byte[] headerBytes = Encoding.ASCII.GetBytes(headers);
+        stream.Write(headerBytes, 0, headerBytes.Length);
+        stream.Write(bodyBytes, 0, bodyBytes.Length);
+        stream.Flush();
     }
 
     private static string CommandText(object command)
