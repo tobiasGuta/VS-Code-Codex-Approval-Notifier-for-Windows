@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('passthrough', 'remote-control')]
+    [ValidateSet('passthrough', 'remote-control', 'local-bridge')]
     [string]$Mode
 )
 
