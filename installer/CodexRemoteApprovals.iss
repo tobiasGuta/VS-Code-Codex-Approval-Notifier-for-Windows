@@ -1,5 +1,5 @@
 #define MyAppName "Codex Remote Approvals"
-#define MyAppVersion "4.0.0-alpha"
+#define MyAppVersion "4.0.0"
 #define MyAppPublisher "Codex Remote Approvals"
 #define MyAppExeName "tray-build\CodexRemoteTray.exe"
 
