@@ -19,18 +19,14 @@ internal static class CodexAppServerShim
     private const string DisableRemoteControlForTestsEnvironmentVariable = "CODEX_APPROVAL_NOTIFIER_SHIM_DISABLE_REMOTE_CONTROL_FOR_TESTS";
     private const string ForceRemoteControlForTestsEnvironmentVariable = "CODEX_APPROVAL_NOTIFIER_SHIM_FORCE_REMOTE_CONTROL_FOR_TESTS";
     private const string LocalBridgeMode = "local-bridge";
+    private const string CleanupGuardianArgument = "--codex-shim-cleanup-guardian";
+    private const string CleanupGuardianReady = "CODEX_SHIM_GUARDIAN_READY";
 
     private const uint JobObjectExtendedLimitInformation = 9;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
-    private const uint DeleteAccess = 0x00010000;
-    private const uint FileShareRead = 0x00000001;
-    private const uint FileShareWrite = 0x00000002;
-    private const uint FileShareDelete = 0x00000004;
-    private const uint OpenExisting = 3;
-    private const uint FileAttributeNormal = 0x00000080;
-    private const uint FileFlagDeleteOnClose = 0x04000000;
-
-    private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
+    private const uint SynchronizeAccess = 0x00100000;
+    private const uint WaitObject0 = 0x00000000;
+    private const uint Infinite = 0xFFFFFFFF;
 
     private static readonly HashSet<string> AppServerToolingSubcommands =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -44,6 +40,11 @@ internal static class CodexAppServerShim
 
     private static int Main(string[] args)
     {
+        if (IsCleanupGuardianInvocation(args))
+        {
+            return RunCleanupGuardian(args);
+        }
+
         Process child = null;
         IntPtr childJob = IntPtr.Zero;
         string descriptorPath = null;
@@ -148,9 +149,8 @@ internal static class CodexAppServerShim
         descriptorPath = null;
         tokenPath = null;
         Process child = null;
+        Process cleanupGuardian = null;
         IntPtr childJob = IntPtr.Zero;
-        IntPtr tokenDeleteLease = IntPtr.Zero;
-        IntPtr descriptorDeleteLease = IntPtr.Zero;
         ClientWebSocket socket = null;
         Thread stderrPump = null;
         try
@@ -161,9 +161,15 @@ internal static class CodexAppServerShim
             int shimPid = Process.GetCurrentProcess().Id;
             tokenPath = Path.Combine(runtimeDirectory, "bridge-" + shimPid + ".token");
             descriptorPath = Path.Combine(runtimeDirectory, "bridge-" + shimPid + ".json");
+
+            // The guardian is ready before any ephemeral bridge file is created.
+            // It holds a SYNCHRONIZE handle to this exact shim process object, so
+            // PID reuse cannot confuse cleanup. If this shim is terminated hard,
+            // the guardian deletes only this shim PID's descriptor/token and exits.
+            cleanupGuardian = StartCleanupGuardian(shimPid, descriptorPath, tokenPath);
+
             string token = CreateCapabilityToken();
             File.WriteAllText(tokenPath, token + Environment.NewLine, new UTF8Encoding(false));
-            tokenDeleteLease = AcquireDeleteOnCloseLease(tokenPath);
 
             var bridgeArgs = new List<string>(originalArgs);
             bridgeArgs.Add("--listen");
@@ -212,7 +218,6 @@ internal static class CodexAppServerShim
             }
 
             WriteBridgeDescriptor(descriptorPath, shimPid, child.Id, wsUri, tokenPath, targetPath);
-            descriptorDeleteLease = AcquireDeleteOnCloseLease(descriptorPath);
             Console.Error.WriteLine("[CodexLocalBridge] Connected to " + wsUri + " (Codex PID " + child.Id + ").");
             Console.Error.WriteLine("[CodexLocalBridge] Descriptor: " + descriptorPath);
 
@@ -289,11 +294,17 @@ internal static class CodexAppServerShim
                 catch { }
                 child.Dispose();
             }
-            CloseNativeHandle(ref descriptorDeleteLease);
-            CloseNativeHandle(ref tokenDeleteLease);
             CloseNativeHandle(ref childJob);
             SafeDelete(descriptorPath);
             SafeDelete(tokenPath);
+            if (cleanupGuardian != null)
+            {
+                // Do not kill or wait for the guardian here: it intentionally waits
+                // for this shim process object to signal. Disposing our Process
+                // wrapper closes only our local handles; the guardian exits after
+                // this shim actually terminates.
+                try { cleanupGuardian.Dispose(); } catch { }
+            }
         }
     }
 
@@ -312,6 +323,155 @@ internal static class CodexAppServerShim
         };
         startInfo.EnvironmentVariables[ActiveEnvironmentVariable] = "1";
         return startInfo;
+    }
+
+    private static Process StartCleanupGuardian(int ownerPid, string descriptorPath, string tokenPath)
+    {
+        if (!IsExpectedBridgeArtifactPath(descriptorPath, ownerPid, ".json") ||
+            !IsExpectedBridgeArtifactPath(tokenPath, ownerPid, ".token"))
+        {
+            throw new InvalidOperationException("Cleanup guardian paths do not match the owning shim PID.");
+        }
+
+        string shimPath = Path.GetFullPath(Process.GetCurrentProcess().MainModule.FileName);
+        var guardianArgs = new List<string>
+        {
+            CleanupGuardianArgument,
+            ownerPid.ToString(),
+            descriptorPath,
+            tokenPath
+        };
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = shimPath,
+            Arguments = BuildCommandLine(guardianArgs),
+            WorkingDirectory = Environment.CurrentDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        var guardian = new Process { StartInfo = startInfo };
+        try
+        {
+            if (!guardian.Start())
+            {
+                throw new InvalidOperationException("Failed to start bridge cleanup guardian.");
+            }
+
+            var readyTask = guardian.StandardOutput.ReadLineAsync();
+            if (!readyTask.Wait(5000))
+            {
+                throw new TimeoutException("Timed out waiting for bridge cleanup guardian readiness.");
+            }
+
+            string ready = readyTask.Result;
+            if (!string.Equals(ready, CleanupGuardianReady, StringComparison.Ordinal))
+            {
+                string detail = string.IsNullOrWhiteSpace(ready) ? "no readiness response" : ready;
+                throw new InvalidOperationException("Bridge cleanup guardian failed to become ready: " + detail);
+            }
+
+            return guardian;
+        }
+        catch
+        {
+            try
+            {
+                if (!guardian.HasExited) guardian.Kill();
+            }
+            catch { }
+            try { guardian.Dispose(); } catch { }
+            throw;
+        }
+    }
+
+    private static bool IsCleanupGuardianInvocation(string[] args)
+    {
+        return args != null &&
+               args.Length == 4 &&
+               string.Equals(args[0], CleanupGuardianArgument, StringComparison.Ordinal);
+    }
+
+    private static int RunCleanupGuardian(string[] args)
+    {
+        int ownerPid;
+        if (!int.TryParse(args[1], out ownerPid) || ownerPid <= 0)
+        {
+            return 90;
+        }
+
+        string descriptorPath = args[2];
+        string tokenPath = args[3];
+        if (!IsExpectedBridgeArtifactPath(descriptorPath, ownerPid, ".json") ||
+            !IsExpectedBridgeArtifactPath(tokenPath, ownerPid, ".token"))
+        {
+            return 91;
+        }
+
+        IntPtr ownerHandle = OpenProcess(SynchronizeAccess, false, ownerPid);
+        if (ownerHandle == IntPtr.Zero)
+        {
+            return 92;
+        }
+
+        try
+        {
+            Console.Out.WriteLine(CleanupGuardianReady);
+            Console.Out.Flush();
+
+            uint waitResult = WaitForSingleObject(ownerHandle, Infinite);
+            if (waitResult != WaitObject0)
+            {
+                return 93;
+            }
+        }
+        finally
+        {
+            CloseHandle(ownerHandle);
+        }
+
+        DeleteWithRetry(descriptorPath, 5000);
+        DeleteWithRetry(tokenPath, 5000);
+        return (!File.Exists(descriptorPath) && !File.Exists(tokenPath)) ? 0 : 94;
+    }
+
+    private static bool IsExpectedBridgeArtifactPath(string path, int ownerPid, string extension)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        try
+        {
+            string expected = Path.GetFullPath(Path.Combine(
+                GetBridgeRuntimeDirectory(),
+                "bridge-" + ownerPid + extension));
+            string actual = Path.GetFullPath(path);
+            return string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void DeleteWithRetry(string path, int timeoutMilliseconds)
+    {
+        DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMilliseconds);
+        do
+        {
+            try
+            {
+                if (!File.Exists(path)) return;
+                File.Delete(path);
+                if (!File.Exists(path)) return;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            Thread.Sleep(50);
+        }
+        while (DateTime.UtcNow < deadline);
     }
 
     private static IntPtr CreateKillOnCloseJob()
@@ -364,27 +524,9 @@ internal static class CodexAppServerShim
         }
     }
 
-    private static IntPtr AcquireDeleteOnCloseLease(string path)
-    {
-        IntPtr handle = CreateFile(
-            path,
-            DeleteAccess,
-            FileShareRead | FileShareWrite | FileShareDelete,
-            IntPtr.Zero,
-            OpenExisting,
-            FileAttributeNormal | FileFlagDeleteOnClose,
-            IntPtr.Zero);
-
-        if (handle == InvalidHandleValue)
-        {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not bind ephemeral bridge file to shim lifetime: " + path);
-        }
-        return handle;
-    }
-
     private static void CloseNativeHandle(ref IntPtr handle)
     {
-        if (handle == IntPtr.Zero || handle == InvalidHandleValue) return;
+        if (handle == IntPtr.Zero || handle == new IntPtr(-1)) return;
         try { CloseHandle(handle); } catch { }
         handle = IntPtr.Zero;
     }
@@ -777,15 +919,11 @@ internal static class CodexAppServerShim
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr CreateFile(
-        string lpFileName,
-        uint dwDesiredAccess,
-        uint dwShareMode,
-        IntPtr lpSecurityAttributes,
-        uint dwCreationDisposition,
-        uint dwFlagsAndAttributes,
-        IntPtr hTemplateFile);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr hObject);
