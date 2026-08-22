@@ -8,9 +8,11 @@ using System.Threading;
 internal static class CodexAppServerShim
 {
     private const string TargetFileName = "CodexAppServerShim.target";
+    private const string ModeFileName = "CodexAppServerShim.mode";
     private const string TargetOverrideEnvironmentVariable = "CODEX_APPROVAL_NOTIFIER_SHIM_TARGET";
     private const string ActiveEnvironmentVariable = "CODEX_APPROVAL_NOTIFIER_SHIM_ACTIVE";
     private const string DisableRemoteControlForTestsEnvironmentVariable = "CODEX_APPROVAL_NOTIFIER_SHIM_DISABLE_REMOTE_CONTROL_FOR_TESTS";
+    private const string ForceRemoteControlForTestsEnvironmentVariable = "CODEX_APPROVAL_NOTIFIER_SHIM_FORCE_REMOTE_CONTROL_FOR_TESTS";
 
     private static readonly HashSet<string> AppServerToolingSubcommands =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -183,6 +185,33 @@ internal static class CodexAppServerShim
             return false;
         }
 
+        bool forceForTest = string.Equals(
+            Environment.GetEnvironmentVariable(ForceRemoteControlForTestsEnvironmentVariable),
+            "1",
+            StringComparison.Ordinal);
+
+        if (!IsLiveAppServerInvocation(args))
+        {
+            return false;
+        }
+
+        if (forceForTest)
+        {
+            return true;
+        }
+
+        string modePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ModeFileName);
+        if (!File.Exists(modePath))
+        {
+            return false;
+        }
+
+        string mode = File.ReadAllText(modePath, Encoding.UTF8).Trim();
+        return string.Equals(mode, "remote-control", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsLiveAppServerInvocation(IList<string> args)
+    {
         if (args == null || args.Count == 0)
         {
             return false;
