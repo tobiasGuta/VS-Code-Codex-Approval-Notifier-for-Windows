@@ -267,15 +267,21 @@
   });
 
   const fragmentPairingCode = consumePairingFragment();
-  if (getToken()) {
-    setPairedUi(true);
-    refresh();
-  } else if (fragmentPairingCode) {
+
+  // A freshly scanned QR belongs to the gateway instance that generated it.
+  // Give it precedence over any token left in Safari from an older gateway
+  // process. This both invalidates the old session locally and allows a single
+  // scan to establish the new session after a gateway/tray restart.
+  if (fragmentPairingCode) {
+    setToken('');
     setPairedUi(false);
     els.pairStatus.textContent = 'Pairing with this PC…';
     pair(fragmentPairingCode).then(success => {
       if (!success) loadPairingStatus();
     });
+  } else if (getToken()) {
+    setPairedUi(true);
+    refresh();
   } else {
     setPairedUi(false);
     loadPairingStatus();
