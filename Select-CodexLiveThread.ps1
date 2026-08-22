@@ -5,16 +5,70 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-BridgeRuntimeDirectory {
+    return (Join-Path $env:LOCALAPPDATA 'CodexApprovalNotifier\local-bridge')
+}
+
+function Test-BridgeDescriptorIdentity {
+    param(
+        [Parameter(Mandatory)]$Descriptor,
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$ThrowOnFailure
+    )
+
+    try {
+        $shimPid = [int]$Descriptor.shimPid
+        $codexPid = [int]$Descriptor.codexPid
+        if ($shimPid -le 0 -or $codexPid -le 0) { throw 'Bridge descriptor contains an invalid process id.' }
+
+        $createdText = [string]$Descriptor.createdAt
+        if ([string]::IsNullOrWhiteSpace($createdText)) { throw 'Bridge descriptor is missing createdAt.' }
+        $createdAt = [DateTimeOffset]::Parse($createdText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+
+        $runtimeDir = [IO.Path]::GetFullPath((Get-BridgeRuntimeDirectory)).TrimEnd('\')
+        $actualDescriptor = [IO.Path]::GetFullPath($Path)
+        $expectedDescriptor = [IO.Path]::GetFullPath((Join-Path $runtimeDir "bridge-$shimPid.json"))
+        if (-not [string]::Equals($actualDescriptor, $expectedDescriptor, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Bridge descriptor path does not match its shim PID.'
+        }
+
+        $tokenPath = [string]$Descriptor.tokenFile
+        if ([string]::IsNullOrWhiteSpace($tokenPath)) { throw 'Bridge descriptor is missing tokenFile.' }
+        $actualToken = [IO.Path]::GetFullPath($tokenPath)
+        $expectedToken = [IO.Path]::GetFullPath((Join-Path $runtimeDir "bridge-$shimPid.token"))
+        if (-not [string]::Equals($actualToken, $expectedToken, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Bridge token path does not match its shim PID.'
+        }
+
+        $shim = Get-Process -Id $shimPid -ErrorAction Stop
+        $codex = Get-Process -Id $codexPid -ErrorAction Stop
+        $shimStarted = [DateTimeOffset]$shim.StartTime
+        $codexStarted = [DateTimeOffset]$codex.StartTime
+
+        if ($shimStarted -gt $createdAt) {
+            throw 'Bridge shim PID belongs to a process that started after the descriptor was created.'
+        }
+        if ($codexStarted -gt $createdAt) {
+            throw 'Bridge Codex PID belongs to a process that started after the descriptor was created.'
+        }
+
+        return $true
+    }
+    catch {
+        if ($ThrowOnFailure) { throw }
+        return $false
+    }
+}
+
 function Find-LiveBridgeDescriptor {
-    $runtimeDir = Join-Path $env:LOCALAPPDATA 'CodexApprovalNotifier\local-bridge'
+    $runtimeDir = Get-BridgeRuntimeDirectory
     if (-not (Test-Path -LiteralPath $runtimeDir -PathType Container)) {
         throw 'Remote approvals bridge is not running. Open VS Code with the Codex bridge enabled.'
     }
     foreach ($candidate in @(Get-ChildItem -LiteralPath $runtimeDir -Filter 'bridge-*.json' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)) {
         try {
             $d = Get-Content -LiteralPath $candidate.FullName -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-            if ($null -ne (Get-Process -Id ([int]$d.shimPid) -ErrorAction SilentlyContinue) -and
-                $null -ne (Get-Process -Id ([int]$d.codexPid) -ErrorAction SilentlyContinue)) {
+            if (Test-BridgeDescriptorIdentity -Descriptor $d -Path $candidate.FullName) {
                 return $candidate.FullName
             }
         } catch { }
@@ -69,7 +123,9 @@ function Receive-ForId($Socket, [int]$Id, [int]$TimeoutMs = 15000) {
 }
 
 if ([string]::IsNullOrWhiteSpace($DescriptorPath)) { $DescriptorPath = Find-LiveBridgeDescriptor }
+$DescriptorPath = [IO.Path]::GetFullPath($DescriptorPath)
 $descriptor = Get-Content -LiteralPath $DescriptorPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+$null = Test-BridgeDescriptorIdentity -Descriptor $descriptor -Path $DescriptorPath -ThrowOnFailure
 $uri = [Uri][string]$descriptor.uri
 $tokenFile = [string]$descriptor.tokenFile
 if ($uri.Scheme -ne 'ws' -or $uri.Host -notin @('127.0.0.1','localhost','::1')) { throw 'Bridge descriptor is not loopback-only.' }
