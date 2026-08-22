@@ -49,13 +49,13 @@ $descriptor = Get-Content -LiteralPath $CompanionDescriptorPath -Raw -Encoding U
 $api = [string]$descriptor.api
 $tokenFile = [string]$descriptor.tokenFile
 $threadId = [string]$descriptor.threadId
-$pid = [int]$descriptor.pid
+$companionPid = [int]$descriptor.pid
 
 if (-not $api.StartsWith('http://127.0.0.1:', [StringComparison]::OrdinalIgnoreCase)) {
     throw "Companion API is not loopback-only: $api"
 }
-if ($null -eq (Get-Process -Id $pid -ErrorAction SilentlyContinue)) {
-    throw "Companion process is not running: PID $pid"
+if ($null -eq (Get-Process -Id $companionPid -ErrorAction SilentlyContinue)) {
+    throw "Companion process is not running: PID $companionPid"
 }
 if (-not (Test-Path -LiteralPath $tokenFile -PathType Leaf)) {
     throw "Companion token file missing: $tokenFile"
