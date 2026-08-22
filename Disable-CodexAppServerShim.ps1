@@ -13,12 +13,16 @@ if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
 $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
 $settingsPath = [string]$state.settingsPath
 $backupPath = [string]$state.backupPath
+$modePath = [string]$state.modePath
 
 if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
     throw "Shim settings backup not found: $backupPath"
 }
 
 Copy-Item -LiteralPath $backupPath -Destination $settingsPath -Force
+if (-not [string]::IsNullOrWhiteSpace($modePath)) {
+    Remove-Item -LiteralPath $modePath -Force -ErrorAction SilentlyContinue
+}
 Remove-Item -LiteralPath $statePath -Force
 Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
 
