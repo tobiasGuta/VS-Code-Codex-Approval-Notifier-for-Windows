@@ -13,6 +13,13 @@ using System.Web.Script.Serialization;
 
 internal static class CodexLocalCompanion
 {
+    private enum ApprovalState
+    {
+        Pending,
+        UserClaimed,
+        ExpiredDeclinePending
+    }
+
     private sealed class PendingApproval
     {
         public string Handle;
@@ -24,19 +31,25 @@ internal static class CodexLocalCompanion
         public string Cwd;
         public string Reason;
         public DateTimeOffset CreatedAt;
+        public DateTimeOffset ExpiresAt;
+        public DateTimeOffset NextExpiryAttemptAt;
+        public ApprovalState State;
     }
 
     private static readonly object Sync = new object();
     private static readonly object SendSync = new object();
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 100 };
     private static readonly Dictionary<string, PendingApproval> PendingByHandle = new Dictionary<string, PendingApproval>(StringComparer.Ordinal);
-    private static readonly Dictionary<string, string> HandleByRequestId = new Dictionary<string, string>(StringComparer.Ordinal);
+    private static readonly Dictionary<string, PendingApproval> ActiveByRequestId = new Dictionary<string, PendingApproval>(StringComparer.Ordinal);
+    private static readonly HashSet<string> CompletedRequestIds = new HashSet<string>(StringComparer.Ordinal);
 
     private static ClientWebSocket AppSocket;
     private static string ThreadId;
     private static string ApiToken;
     private static TcpListener ApiListener;
     private static volatile bool Stopping;
+    private static int ApprovalTtlSeconds = 300;
+    private static int ExpiredDeclineCount;
 
     private static int Main(string[] args)
     {
@@ -49,6 +62,9 @@ internal static class CodexLocalCompanion
             ThreadId = Require(parsed, "thread");
             int port = parsed.ContainsKey("port") ? int.Parse(parsed["port"]) : 8765;
             if (port < 1 || port > 65535) throw new ArgumentOutOfRangeException("port");
+            ApprovalTtlSeconds = parsed.ContainsKey("approval-ttl-seconds") ? int.Parse(parsed["approval-ttl-seconds"]) : 300;
+            if (ApprovalTtlSeconds < 5 || ApprovalTtlSeconds > 3600)
+                throw new ArgumentOutOfRangeException("approval-ttl-seconds", "approval-ttl-seconds must be between 5 and 3600.");
             string runtimeDir = parsed.ContainsKey("runtime-dir")
                 ? parsed["runtime-dir"]
                 : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexApprovalNotifier", "companion");
@@ -85,13 +101,15 @@ internal static class CodexLocalCompanion
             WriteCompanionDescriptor(apiDescriptorFile, apiBase, apiTokenFile, descriptorPath, ThreadId);
 
             Thread receiveThread = StartBackgroundThread(ReceiveLoop, "CodexCompanion-AppServerReceive");
+            Thread expiryThread = StartBackgroundThread(ExpiryLoop, "CodexCompanion-ApprovalExpiry");
 
             Console.WriteLine("Codex Local Companion started.");
-            Console.WriteLine("Thread:     " + ThreadId);
-            Console.WriteLine("API:        " + apiBase);
-            Console.WriteLine("Descriptor: " + apiDescriptorFile);
-            Console.WriteLine("Auth:       bearer token (not displayed)");
-            Console.WriteLine("Scope:      loopback only; command approvals accept/decline only");
+            Console.WriteLine("Thread:       " + ThreadId);
+            Console.WriteLine("API:          " + apiBase);
+            Console.WriteLine("Descriptor:   " + apiDescriptorFile);
+            Console.WriteLine("Approval TTL: " + ApprovalTtlSeconds + " seconds (expired approvals auto-decline)");
+            Console.WriteLine("Auth:         bearer token (not displayed)");
+            Console.WriteLine("Scope:        loopback only; command approvals accept/decline only");
 
             try
             {
@@ -110,6 +128,7 @@ internal static class CodexLocalCompanion
                 try { ApiListener.Stop(); } catch { }
                 try { AppSocket.Dispose(); } catch { }
                 try { receiveThread.Join(1500); } catch { }
+                try { expiryThread.Join(1500); } catch { }
             }
 
             return 0;
@@ -185,6 +204,89 @@ internal static class CodexLocalCompanion
         }
     }
 
+    private static void ExpiryLoop()
+    {
+        while (!Stopping)
+        {
+            try
+            {
+                foreach (PendingApproval approval in CollectDueExpiryDeclines())
+                {
+                    if (Stopping) break;
+                    SendExpiredDecline(approval);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!Stopping) Console.Error.WriteLine("Approval expiry loop error: " + ex.Message);
+            }
+
+            for (int i = 0; i < 4 && !Stopping; i++) Thread.Sleep(50);
+        }
+    }
+
+    private static List<PendingApproval> CollectDueExpiryDeclines()
+    {
+        var due = new List<PendingApproval>();
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        lock (Sync)
+        {
+            foreach (PendingApproval approval in ActiveByRequestId.Values)
+            {
+                if (approval.State == ApprovalState.Pending && now >= approval.ExpiresAt)
+                {
+                    PendingByHandle.Remove(approval.Handle);
+                    approval.State = ApprovalState.ExpiredDeclinePending;
+                    approval.NextExpiryAttemptAt = now;
+                    Console.WriteLine("Command approval expired; auto-decline queued: " + approval.Handle + "  " + approval.Command);
+                }
+
+                if (approval.State == ApprovalState.ExpiredDeclinePending && now >= approval.NextExpiryAttemptAt)
+                {
+                    approval.NextExpiryAttemptAt = now.AddSeconds(1);
+                    due.Add(approval);
+                }
+            }
+        }
+        return due;
+    }
+
+    private static void SendExpiredDecline(PendingApproval approval)
+    {
+        string requestKey = RequestKey(approval.RequestId);
+        lock (Sync)
+        {
+            PendingApproval current;
+            if (!ActiveByRequestId.TryGetValue(requestKey, out current) ||
+                !object.ReferenceEquals(current, approval) ||
+                approval.State != ApprovalState.ExpiredDeclinePending)
+            {
+                return;
+            }
+        }
+
+        try
+        {
+            SendDecision(approval, "decline");
+            CompleteApproval(approval);
+            Interlocked.Increment(ref ExpiredDeclineCount);
+            Console.WriteLine("Expired command approval auto-declined: " + approval.Handle + "  " + approval.Command);
+        }
+        catch (Exception ex)
+        {
+            bool stillActive;
+            lock (Sync)
+            {
+                PendingApproval current;
+                stillActive = ActiveByRequestId.TryGetValue(requestKey, out current) && object.ReferenceEquals(current, approval);
+            }
+            if (stillActive && !Stopping)
+            {
+                Console.Error.WriteLine("Expired approval auto-decline send failed; retrying: " + ex.Message);
+            }
+        }
+    }
+
     private static void HandleAppServerMessage(IDictionary message)
     {
         string method = message.Contains("method") ? Convert.ToString(message["method"]) : null;
@@ -197,7 +299,8 @@ internal static class CodexLocalCompanion
             string requestKey = RequestKey(message["id"]);
             lock (Sync)
             {
-                if (HandleByRequestId.ContainsKey(requestKey)) return;
+                if (ActiveByRequestId.ContainsKey(requestKey) || CompletedRequestIds.Contains(requestKey)) return;
+                DateTimeOffset created = DateTimeOffset.UtcNow;
                 var approval = new PendingApproval
                 {
                     Handle = Guid.NewGuid().ToString("N"),
@@ -208,10 +311,13 @@ internal static class CodexLocalCompanion
                     Command = p.Contains("command") ? CommandText(p["command"]) : null,
                     Cwd = p.Contains("cwd") ? Convert.ToString(p["cwd"]) : null,
                     Reason = p.Contains("reason") ? Convert.ToString(p["reason"]) : null,
-                    CreatedAt = DateTimeOffset.Now
+                    CreatedAt = created,
+                    ExpiresAt = created.AddSeconds(ApprovalTtlSeconds),
+                    NextExpiryAttemptAt = created,
+                    State = ApprovalState.Pending
                 };
                 PendingByHandle.Add(approval.Handle, approval);
-                HandleByRequestId.Add(requestKey, approval.Handle);
+                ActiveByRequestId.Add(requestKey, approval);
                 Console.WriteLine("Pending command approval: " + approval.Handle + "  " + approval.Command);
             }
             return;
@@ -222,7 +328,7 @@ internal static class CodexLocalCompanion
             IDictionary p = AsDictionary(message["params"]);
             if (!string.Equals(Convert.ToString(p["threadId"]), ThreadId, StringComparison.Ordinal)) return;
             if (!p.Contains("requestId")) return;
-            RemovePendingByRequestId(p["requestId"]);
+            RemoveActiveByRequestId(p["requestId"]);
         }
     }
 
@@ -287,7 +393,9 @@ internal static class CodexLocalCompanion
                     {
                         { "connected", AppSocket != null && AppSocket.State == WebSocketState.Open },
                         { "threadId", ThreadId },
-                        { "pendingCount", PendingCount() }
+                        { "pendingCount", PendingCount() },
+                        { "approvalTtlSeconds", ApprovalTtlSeconds },
+                        { "expiredDeclineCount", Volatile.Read(ref ExpiredDeclineCount) }
                     });
                     return;
                 }
@@ -330,22 +438,27 @@ internal static class CodexLocalCompanion
         PendingApproval approval;
         lock (Sync)
         {
-            if (!PendingByHandle.TryGetValue(handle, out approval))
+            if (!PendingByHandle.TryGetValue(handle, out approval) || approval.State != ApprovalState.Pending)
             {
                 WriteHttpJson(stream, 409, new Dictionary<string, object> { { "error", "stale_or_resolved" } });
                 return;
             }
+
             PendingByHandle.Remove(handle);
-            HandleByRequestId.Remove(RequestKey(approval.RequestId));
+            if (DateTimeOffset.UtcNow >= approval.ExpiresAt)
+            {
+                approval.State = ApprovalState.ExpiredDeclinePending;
+                approval.NextExpiryAttemptAt = DateTimeOffset.UtcNow;
+                WriteHttpJson(stream, 409, new Dictionary<string, object> { { "error", "stale_or_resolved" } });
+                return;
+            }
+            approval.State = ApprovalState.UserClaimed;
         }
 
         try
         {
-            SendObject(new Dictionary<string, object>
-            {
-                { "id", approval.RequestId },
-                { "result", new Dictionary<string, object> { { "decision", decision } } }
-            });
+            SendDecision(approval, decision);
+            CompleteApproval(approval);
             WriteHttpJson(stream, 200, new Dictionary<string, object>
             {
                 { "ok", true }, { "handle", handle }, { "decision", decision }
@@ -353,13 +466,56 @@ internal static class CodexLocalCompanion
         }
         catch
         {
-            lock (Sync)
-            {
-                if (!PendingByHandle.ContainsKey(handle)) PendingByHandle.Add(handle, approval);
-                string key = RequestKey(approval.RequestId);
-                if (!HandleByRequestId.ContainsKey(key)) HandleByRequestId.Add(key, handle);
-            }
+            RestoreAfterUserDecisionFailure(approval);
             throw;
+        }
+    }
+
+    private static void SendDecision(PendingApproval approval, string decision)
+    {
+        SendObject(new Dictionary<string, object>
+        {
+            { "id", approval.RequestId },
+            { "result", new Dictionary<string, object> { { "decision", decision } } }
+        });
+    }
+
+    private static void CompleteApproval(PendingApproval approval)
+    {
+        string requestKey = RequestKey(approval.RequestId);
+        lock (Sync)
+        {
+            PendingByHandle.Remove(approval.Handle);
+            PendingApproval current;
+            if (ActiveByRequestId.TryGetValue(requestKey, out current) && object.ReferenceEquals(current, approval))
+            {
+                ActiveByRequestId.Remove(requestKey);
+            }
+            CompletedRequestIds.Add(requestKey);
+        }
+    }
+
+    private static void RestoreAfterUserDecisionFailure(PendingApproval approval)
+    {
+        string requestKey = RequestKey(approval.RequestId);
+        lock (Sync)
+        {
+            PendingApproval current;
+            if (!ActiveByRequestId.TryGetValue(requestKey, out current) || !object.ReferenceEquals(current, approval))
+            {
+                return;
+            }
+            if (approval.State != ApprovalState.UserClaimed) return;
+
+            if (DateTimeOffset.UtcNow >= approval.ExpiresAt)
+            {
+                approval.State = ApprovalState.ExpiredDeclinePending;
+                approval.NextExpiryAttemptAt = DateTimeOffset.UtcNow;
+                return;
+            }
+
+            approval.State = ApprovalState.Pending;
+            PendingByHandle[approval.Handle] = approval;
         }
     }
 
@@ -390,32 +546,50 @@ internal static class CodexLocalCompanion
 
     private static object[] SnapshotPending()
     {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
         lock (Sync)
         {
             var list = new List<object>();
             foreach (PendingApproval a in PendingByHandle.Values)
             {
+                if (a.State != ApprovalState.Pending || now >= a.ExpiresAt) continue;
                 list.Add(new Dictionary<string, object>
                 {
                     { "handle", a.Handle }, { "threadId", a.ThreadId }, { "turnId", a.TurnId }, { "itemId", a.ItemId },
-                    { "command", a.Command }, { "cwd", a.Cwd }, { "reason", a.Reason }, { "createdAt", a.CreatedAt.ToString("o") }
+                    { "command", a.Command }, { "cwd", a.Cwd }, { "reason", a.Reason },
+                    { "createdAt", a.CreatedAt.ToString("o") }, { "expiresAt", a.ExpiresAt.ToString("o") }
                 });
             }
             return list.ToArray();
         }
     }
 
-    private static int PendingCount() { lock (Sync) { return PendingByHandle.Count; } }
+    private static int PendingCount()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        lock (Sync)
+        {
+            int count = 0;
+            foreach (PendingApproval a in PendingByHandle.Values)
+            {
+                if (a.State == ApprovalState.Pending && now < a.ExpiresAt) count++;
+            }
+            return count;
+        }
+    }
 
-    private static void RemovePendingByRequestId(object requestId)
+    private static void RemoveActiveByRequestId(object requestId)
     {
         string key = RequestKey(requestId);
         lock (Sync)
         {
-            string handle;
-            if (!HandleByRequestId.TryGetValue(key, out handle)) return;
-            HandleByRequestId.Remove(key);
-            PendingByHandle.Remove(handle);
+            PendingApproval approval;
+            if (ActiveByRequestId.TryGetValue(key, out approval))
+            {
+                PendingByHandle.Remove(approval.Handle);
+                ActiveByRequestId.Remove(key);
+            }
+            CompletedRequestIds.Add(key);
         }
     }
 
@@ -560,7 +734,8 @@ internal static class CodexLocalCompanion
         var d = new Dictionary<string, object>
         {
             { "version", 1 }, { "pid", Process.GetCurrentProcess().Id }, { "api", apiBase }, { "tokenFile", tokenFile },
-            { "bridgeDescriptor", bridgeDescriptor }, { "threadId", threadId }, { "createdAt", DateTimeOffset.Now.ToString("o") }
+            { "bridgeDescriptor", bridgeDescriptor }, { "threadId", threadId }, { "approvalTtlSeconds", ApprovalTtlSeconds },
+            { "createdAt", DateTimeOffset.UtcNow.ToString("o") }
         };
         File.WriteAllText(path, Json.Serialize(d), new UTF8Encoding(false));
     }
