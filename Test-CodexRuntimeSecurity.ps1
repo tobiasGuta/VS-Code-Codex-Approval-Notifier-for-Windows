@@ -26,10 +26,14 @@ function Assert-ProtectedAcl([string]$Path, [bool]$IsDirectory) {
         if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) {
             throw "Unexpected deny rule on $Path"
         }
-        if ($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl -ne [Security.AccessControl.FileSystemRights]::FullControl) {
-            throw "Rule is not FullControl on $Path: $($rule.IdentityReference)"
+
+        $fullControl = [Security.AccessControl.FileSystemRights]::FullControl
+        $hasFullControl = (($rule.FileSystemRights -band $fullControl) -eq $fullControl)
+        if (-not $hasFullControl) {
+            throw "Rule is not FullControl on ${Path}: $($rule.IdentityReference)"
         }
-        if ($rule.IsInherited) { throw "Inherited rule survived on $Path: $($rule.IdentityReference)" }
+
+        if ($rule.IsInherited) { throw "Inherited rule survived on ${Path}: $($rule.IdentityReference)" }
         $actual += Get-SidValue $rule.IdentityReference
     }
 
@@ -42,7 +46,7 @@ function Assert-ProtectedAcl([string]$Path, [bool]$IsDirectory) {
         foreach ($rule in $rules) {
             $needed = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
             if (($rule.InheritanceFlags -band $needed) -ne $needed) {
-                throw "Directory rule does not propagate to child objects on $Path: $($rule.IdentityReference)"
+                throw "Directory rule does not propagate to child objects on ${Path}: $($rule.IdentityReference)"
             }
         }
     }
