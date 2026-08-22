@@ -84,11 +84,19 @@ try {
 
     $launcherIdentityPassed = $false
     try {
+        # A successful identity check proceeds into CodexLocalCompanion. The
+        # synthetic ws://127.0.0.1:1 endpoint then fails in the companion process;
+        # that external nonzero exit is expected and does not constitute an
+        # identity-validation failure.
         & (Join-Path $PSScriptRoot 'Start-CodexLocalCompanion.ps1') -ThreadId $ThreadId -DescriptorPath $descriptorPath | Out-Null
+        $launcherIdentityPassed = $true
     }
     catch {
-        if ($_.Exception.Message -notmatch 'started after the descriptor was created') {
-            $launcherIdentityPassed = $true
+        if ($_.Exception.Message -match 'started after the descriptor was created') {
+            $launcherIdentityPassed = $false
+        }
+        else {
+            throw
         }
     }
     Write-Host "Companion launcher preserved same-second precision: $launcherIdentityPassed"
