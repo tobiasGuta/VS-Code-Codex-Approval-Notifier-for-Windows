@@ -243,10 +243,10 @@ function Initialize-WebSocketClient {
     Send-JsonRpcRequest -Socket $Socket -Id $Id -Method 'initialize' -Params $params
     $response = Receive-JsonRpcForId -Socket $Socket -Id $Id
     if ($null -ne $response.Message.error) {
-        throw "Initialize returned an error for $Name: $($response.Raw)"
+        throw "Initialize returned an error for ${Name}: $($response.Raw)"
     }
     if ($null -eq $response.Message.result) {
-        throw "Initialize returned no result for $Name: $($response.Raw)"
+        throw "Initialize returned no result for ${Name}: $($response.Raw)"
     }
 
     Send-WebSocketText -Socket $Socket -Text '{"method":"initialized"}'
