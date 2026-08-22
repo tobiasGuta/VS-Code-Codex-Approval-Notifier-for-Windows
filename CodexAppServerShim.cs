@@ -290,10 +290,10 @@ internal static class CodexAppServerShim
     {
         DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMilliseconds);
         var regex = new Regex(@"ws://(?:127\.0\.0\.1|localhost|\[::1\]):\d+", RegexOptions.IgnoreCase);
+        var readTask = stderr.ReadLineAsync();
 
         while (DateTime.UtcNow < deadline)
         {
-            var readTask = stderr.ReadLineAsync();
             int remaining = Math.Max(1, (int)(deadline - DateTime.UtcNow).TotalMilliseconds);
             if (!readTask.Wait(Math.Min(500, remaining)))
             {
@@ -312,6 +312,8 @@ internal static class CodexAppServerShim
             {
                 return match.Value;
             }
+
+            readTask = stderr.ReadLineAsync();
         }
 
         throw new TimeoutException("Timed out waiting for Codex app-server to report its loopback WebSocket URI.");
@@ -552,6 +554,8 @@ internal static class CodexAppServerShim
             string arg = args[i] ?? string.Empty;
             if (string.Equals(arg, "--remote-control", StringComparison.OrdinalIgnoreCase)) return false;
             if (string.Equals(arg, "--listen", StringComparison.OrdinalIgnoreCase)) return false;
+            if (string.Equals(arg, "--help", StringComparison.OrdinalIgnoreCase)) return false;
+            if (string.Equals(arg, "-h", StringComparison.OrdinalIgnoreCase)) return false;
             if (AppServerToolingSubcommands.Contains(arg)) return false;
         }
         return true;
