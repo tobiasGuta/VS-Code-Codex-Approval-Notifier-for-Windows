@@ -72,7 +72,9 @@ try {
         Set-Content -LiteralPath (Join-Path $dir 'keep.txt') -Value 'keep' -Encoding ASCII
     }
 
-    & (Join-Path $PSScriptRoot 'Initialize-CodexRuntimeSecurity.ps1') -Root $root
+    $initializer = Join-Path $PSScriptRoot 'Initialize-CodexRuntimeSecurity.ps1'
+    & $initializer -Root $root
+    & $initializer -Root $root
 
     Write-Host '# Codex Runtime Security Acceptance'
     foreach ($case in $cases) {
@@ -92,7 +94,7 @@ try {
     }
 
     Write-Host ''
-    Write-Host 'PASS: sensitive runtime directories are inheritance-protected and stale runtime credentials are removed without deleting unrelated files.' -ForegroundColor Green
+    Write-Host 'PASS: runtime ACL initialization is idempotent; sensitive directories remain protected and stale credentials are removed.' -ForegroundColor Green
 }
 finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
