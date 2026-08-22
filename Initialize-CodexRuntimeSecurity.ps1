@@ -5,6 +5,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Do not rely on PSModulePath/autoload here. Setup is often launched from
+# PowerShell 7 but deliberately invokes Windows PowerShell 5.1 for configuration;
+# the child process can inherit a module search path from its parent shell. Load
+# the Security module that belongs to the current PowerShell host explicitly.
+$securityModuleManifest = [IO.Path]::Combine(
+    $PSHOME,
+    'Modules',
+    'Microsoft.PowerShell.Security',
+    'Microsoft.PowerShell.Security.psd1'
+)
+if (-not [IO.File]::Exists($securityModuleManifest)) {
+    throw "Microsoft.PowerShell.Security was not found for this PowerShell host: $securityModuleManifest"
+}
+Import-Module -Name $securityModuleManifest -Force -ErrorAction Stop
+
 $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
 if (-not (Test-Path -LiteralPath $icacls -PathType Leaf)) {
     throw "Windows ACL utility was not found: $icacls"
