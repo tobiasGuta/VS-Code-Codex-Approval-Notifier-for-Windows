@@ -1,5 +1,6 @@
 <!doctype html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -7,6 +8,7 @@
   <title>Codex Remote Approval</title>
   <link rel="stylesheet" href="/app.css">
 </head>
+
 <body>
   <main class="shell">
     <header class="hero">
@@ -32,7 +34,8 @@
       <p id="pairStatus" class="muted">Checking pairing availability…</p>
       <form id="pairForm" class="pair-form" autocomplete="off">
         <label for="pairCode">6-digit code</label>
-        <input id="pairCode" name="pairCode" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000" required>
+        <input id="pairCode" name="pairCode" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000"
+          required>
         <button id="pairButton" type="submit" class="button primary">Pair this device</button>
       </form>
       <p id="pairError" class="error" role="alert"></p>
@@ -69,9 +72,10 @@
       <section class="panel device-panel">
         <div>
           <p class="eyebrow">THIS DEVICE</p>
-          <p class="muted">The pairing token is kept only for this Safari session.</p>
+          <p class="muted">This device remains paired until you unpair it or the Codex Remote Approvals session
+            restarts.</p>
         </div>
-        <button id="forgetButton" class="button danger-outline" type="button">Forget this device</button>
+        <button id="forgetButton" class="button danger-outline" type="button">Unpair this device</button>
       </section>
     </section>
   </main>
@@ -104,4 +108,5 @@
 
   <script src="/app.js" defer></script>
 </body>
+
 </html>

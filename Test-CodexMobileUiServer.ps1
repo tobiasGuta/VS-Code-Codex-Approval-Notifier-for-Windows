@@ -13,6 +13,18 @@ Write-Host ''
 $web = Invoke-WebRequest -Uri $BaseUrl -Method Get -TimeoutSec 5
 if ($web.StatusCode -ne 200) { throw "Root returned HTTP $($web.StatusCode)." }
 if ($web.Content -notmatch 'Codex Remote Approval') { throw 'Root page did not contain the expected mobile UI title.' }
+if ($web.Content -notmatch '(?s)This device remains paired until you unpair it or the Codex Remote Approvals session\s+restarts\.') {
+    throw 'Root page did not contain the expected device persistence lifecycle description.'
+}
+if ($web.Content -match 'kept only for this Safari session') {
+    throw 'Root page still contains stale session-scoped wording.'
+}
+if ($web.Content -notmatch 'Unpair this device') {
+    throw 'Root page did not contain the expected unpair button label.'
+}
+if ($web.Content -match 'Forget this device') {
+    throw 'Root page still contains the old forget button label.'
+}
 $csp = [string]$web.Headers['Content-Security-Policy']
 if ([string]::IsNullOrWhiteSpace($csp) -or $csp -notmatch "script-src 'self'" -or $csp -notmatch "connect-src 'self'") {
     throw 'Root page is missing the expected strict Content-Security-Policy.'
@@ -21,7 +33,8 @@ Write-Host 'Root mobile page:                 OK'
 Write-Host 'Strict CSP present:               True'
 
 $js = Invoke-WebRequest -Uri ($BaseUrl + 'app.js') -Method Get -TimeoutSec 5
-if ($js.StatusCode -ne 200 -or $js.Content -notmatch 'sessionStorage') { throw 'app.js did not load as expected.' }
+if ($js.StatusCode -ne 200 -or $js.Content -notmatch 'localStorage' -or $js.Content -match 'sessionStorage') { throw 'app.js did not load as expected.' }
+if ($js.Content -match 'This Safari session has been forgotten') { throw 'app.js contains stale session-scoped wording.' }
 Write-Host 'JavaScript asset:                 OK'
 
 $css = Invoke-WebRequest -Uri ($BaseUrl + 'app.css') -Method Get -TimeoutSec 5
