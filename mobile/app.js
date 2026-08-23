@@ -26,12 +26,12 @@
   let refreshing = false;
 
   function getToken() {
-    return sessionStorage.getItem(tokenKey) || '';
+    return localStorage.getItem(tokenKey) || '';
   }
 
   function setToken(token) {
-    if (token) sessionStorage.setItem(tokenKey, token);
-    else sessionStorage.removeItem(tokenKey);
+    if (token) localStorage.setItem(tokenKey, token);
+    else localStorage.removeItem(tokenKey);
   }
 
   function authHeaders() {
@@ -60,7 +60,7 @@
     });
 
     let body = {};
-    try { body = await response.json(); } catch (_) {}
+    try { body = await response.json(); } catch (_) { }
 
     if (!response.ok) {
       const error = new Error(body.error || `HTTP ${response.status}`);
@@ -251,7 +251,7 @@
       setToken('');
       els.forgetButton.disabled = false;
       setPairedUi(false);
-      els.pairError.textContent = 'This Safari session has been forgotten.';
+      els.pairError.textContent = 'This device has been unpaired.';
       loadPairingStatus();
     }
   }
@@ -269,7 +269,7 @@
   const fragmentPairingCode = consumePairingFragment();
 
   // A freshly scanned QR belongs to the gateway instance that generated it.
-  // Give it precedence over any token left in Safari from an older gateway
+  // Give it precedence over any token left in browser storage from an older gateway
   // process. This both invalidates the old session locally and allows a single
   // scan to establish the new session after a gateway/tray restart.
   if (fragmentPairingCode) {
