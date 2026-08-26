@@ -89,7 +89,7 @@ internal static class CodexLanGateway
             Console.WriteLine("Descriptor:  " + descriptorFile);
             Console.WriteLine("Pairing code: " + PairingCode);
             Console.WriteLine("Expires:      " + PairingExpiresAt.ToString("o"));
-            Console.WriteLine("Scope:        status + command approvals accept/decline only");
+            Console.WriteLine("Scope:        status + command/file-change approvals accept/decline only");
             Console.WriteLine("Security:     explicit private IPv4 bind; one-time pairing; single in-memory device token");
             Console.WriteLine("WARNING:      prototype uses HTTP on the trusted home LAN; HTTPS is not enabled yet.");
 
