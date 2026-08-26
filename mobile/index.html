@@ -15,7 +15,7 @@
       <div>
         <p class="eyebrow">HOME LAN</p>
         <h1>Codex Remote Approval</h1>
-        <p class="sub">Approve or deny native VS Code Codex command requests from this paired device.</p>
+        <p class="sub">Approve or deny native VS Code Codex command and file-change requests from this paired device.</p>
       </div>
       <span id="connectionBadge" class="badge neutral">Not paired</span>
     </header>
@@ -34,8 +34,7 @@
       <p id="pairStatus" class="muted">Checking pairing availability…</p>
       <form id="pairForm" class="pair-form" autocomplete="off">
         <label for="pairCode">6-digit code</label>
-        <input id="pairCode" name="pairCode" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000"
-          required>
+        <input id="pairCode" name="pairCode" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000" required>
         <button id="pairButton" type="submit" class="button primary">Pair this device</button>
       </form>
       <p id="pairError" class="error" role="alert"></p>
@@ -60,20 +59,19 @@
       <section class="section-head">
         <div>
           <p class="eyebrow">PENDING</p>
-          <h2>Command approvals</h2>
+          <h2>Codex approvals</h2>
         </div>
         <button id="refreshButton" class="button ghost" type="button">Refresh</button>
       </section>
 
       <div id="approvalList" class="approval-list" aria-live="polite"></div>
-      <p id="emptyState" class="empty hidden">No command approvals are waiting.</p>
+      <p id="emptyState" class="empty hidden">No approvals are waiting.</p>
       <p id="appError" class="error" role="alert"></p>
 
       <section class="panel device-panel">
         <div>
           <p class="eyebrow">THIS DEVICE</p>
-          <p class="muted">This device remains paired until you unpair it or the Codex Remote Approvals session
-            restarts.</p>
+          <p class="muted">This device remains paired until you unpair it or the Codex Remote Approvals session restarts.</p>
         </div>
         <button id="forgetButton" class="button danger-outline" type="button">Unpair this device</button>
       </section>
@@ -83,17 +81,26 @@
   <template id="approvalTemplate">
     <article class="approval-card">
       <div class="approval-top">
-        <span class="badge waiting">Approval required</span>
+        <span class="badge waiting approval-kind">Approval required</span>
         <time class="created"></time>
       </div>
-      <div class="field">
-        <span>Command</span>
-        <code class="command"></code>
+
+      <div class="command-details">
+        <div class="field">
+          <span>Command</span>
+          <code class="command"></code>
+        </div>
+        <div class="field cwd-field">
+          <span>Working directory</span>
+          <code class="cwd"></code>
+        </div>
       </div>
-      <div class="field cwd-field">
-        <span>Working directory</span>
-        <code class="cwd"></code>
+
+      <div class="file-details hidden">
+        <p class="file-warning hidden">File details are unavailable or incomplete. Review in VS Code or deny this request.</p>
+        <div class="file-changes"></div>
       </div>
+
       <div class="field reason-field">
         <span>Reason</span>
         <p class="reason"></p>
